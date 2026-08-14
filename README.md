@@ -42,9 +42,17 @@ IDENTITY_TENANT_ID=local \
 IDENTITY_UPSTREAM_ISSUER=https://accounts.google.com \
 IDENTITY_UPSTREAM_CLIENT_ID='your-client-id' \
 IDENTITY_UPSTREAM_CLIENT_SECRET='your-client-secret' \
+IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM=hd \
+IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS=example.com \
 IDENTITY_DATABASE_PATH=/tmp/daemonloom-identity.sqlite3 \
 cargo run --locked
 ```
+
+The organization policy is optional, but the claim and allowlist must be configured together. It
+reads only the cryptographically verified upstream ID token. Each configured base domain admits
+the exact domain and label-bound subdomains; `evilexample.com` does not match `example.com`. With
+Google Workspace, use the signed `hd` claim rather than inferring membership from the email
+address or the authorization request's `hd` hint.
 
 Production configuration refuses a non-HTTPS public origin. Plain HTTP is accepted only for the
 literal `127.0.0.1` local-test origin.

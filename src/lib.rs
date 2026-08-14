@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::Router;
 use axum::extract::{Form, Query, State};
 use axum::http::StatusCode;
@@ -14,13 +14,17 @@ use axum::response::{Html, IntoResponse, Json, Redirect, Response};
 use axum::routing::{get, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
+use openidconnect::core::{
+    CoreAuthenticationFlow, CoreClient, CoreGenderClaim, CoreJweContentEncryptionAlgorithm,
+    CoreJwsSigningAlgorithm, CoreProviderMetadata,
+};
 use openidconnect::{
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
+    AdditionalClaims, AuthorizationCode, ClientId, ClientSecret, CsrfToken, IdToken, IssuerUrl,
+    Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -38,9 +42,105 @@ pub struct Config {
     pub upstream_issuer: String,
     pub upstream_client_id: String,
     pub upstream_client_secret: String,
+    pub organization_domain_policy: OrganizationDomainPolicy,
     pub database_url: Option<String>,
     pub database_path: PathBuf,
 }
+
+/// Restricts logins using a domain claim from the cryptographically verified upstream ID token.
+#[derive(Debug, Clone, Default)]
+pub struct OrganizationDomainPolicy {
+    claim: Option<String>,
+    allowed_base_domains: Vec<String>,
+}
+
+impl OrganizationDomainPolicy {
+    /// Builds a policy. The claim and domain list must either both be configured or both omitted.
+    ///
+    /// A configured base domain admits the exact domain and its DNS-label-bound subdomains.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for incomplete policies, invalid claim names, or invalid DNS domains.
+    pub fn new(claim: Option<String>, allowed_base_domains: Vec<String>) -> Result<Self> {
+        let claim = claim
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let mut normalized_domains = BTreeSet::new();
+        for domain in allowed_base_domains {
+            normalized_domains.insert(normalize_base_domain(&domain)?);
+        }
+
+        match (&claim, normalized_domains.is_empty()) {
+            (None, true) => Ok(Self::default()),
+            (Some(_), true) => bail!("an organization domain claim requires allowed base domains"),
+            (None, false) => bail!("allowed organization base domains require a claim name"),
+            (Some(name), false) => {
+                if name.len() > 512 || name.chars().any(char::is_whitespace) {
+                    bail!("organization domain claim must be a non-whitespace JSON claim name");
+                }
+                Ok(Self {
+                    claim,
+                    allowed_base_domains: normalized_domains.into_iter().collect(),
+                })
+            }
+        }
+    }
+
+    fn admits(&self, claims: &HashMap<String, Value>) -> bool {
+        let Some(claim) = self.claim.as_deref() else {
+            return true;
+        };
+        let Some(domain) = claims.get(claim).and_then(Value::as_str) else {
+            return false;
+        };
+        let domain = domain.to_ascii_lowercase();
+        self.allowed_base_domains.iter().any(|base| {
+            domain == *base
+                || domain
+                    .strip_suffix(base)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        })
+    }
+}
+
+fn normalize_base_domain(value: &str) -> Result<String> {
+    let domain = value.trim().to_ascii_lowercase();
+    if domain.is_empty() || domain.len() > 253 || domain.ends_with('.') || !domain.is_ascii() {
+        bail!("organization base domain must be an ASCII DNS name without a trailing dot");
+    }
+    for label in domain.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || !label
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            || !label
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            bail!("organization base domain contains an invalid DNS label");
+        }
+    }
+    Ok(domain)
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct UpstreamAdditionalClaims(HashMap<String, Value>);
+
+impl AdditionalClaims for UpstreamAdditionalClaims {}
+
+type UpstreamIdToken = IdToken<
+    UpstreamAdditionalClaims,
+    CoreGenderClaim,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJwsSigningAlgorithm,
+>;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -711,15 +811,30 @@ async fn upstream_callback(
         .request_async(&state.http_client)
         .await
         .map_err(HttpError::internal)?;
-    let id_token = response
+    let core_id_token = response
         .id_token()
         .ok_or_else(|| HttpError::denied("upstream issuer returned no OpenID Connect ID token"))?;
+    // Reparse the token with catch-all additional claims, then verify the same signed JWT before
+    // consulting a deployment-selected organization claim such as Google's `hd` claim.
+    let id_token = core_id_token
+        .to_string()
+        .parse::<UpstreamIdToken>()
+        .map_err(|_| HttpError::denied("upstream ID token could not be decoded"))?;
     let claims = id_token
         .claims(
             &client.id_token_verifier(),
             &Nonce::new(login.upstream_nonce),
         )
         .map_err(|_| HttpError::denied("upstream ID token validation failed"))?;
+    if !state
+        .config
+        .organization_domain_policy
+        .admits(&claims.additional_claims().0)
+    {
+        return Err(HttpError::denied(
+            "upstream organization is not admitted by this deployment",
+        ));
+    }
     if claims.email().is_some() && claims.email_verified() != Some(true) {
         return Err(HttpError::denied("upstream email address is not verified"));
     }
@@ -903,6 +1018,7 @@ mod tests {
             upstream_issuer: "https://accounts.example.test".to_owned(),
             upstream_client_id: "upstream-client".to_owned(),
             upstream_client_secret: "not-a-real-secret".to_owned(),
+            organization_domain_policy: OrganizationDomainPolicy::default(),
             database_url: None,
             database_path: PathBuf::new(),
         }
@@ -932,6 +1048,56 @@ mod tests {
         query = authorization_query();
         query.code_challenge_method = "plain".to_owned();
         assert!(validate_authorization_request(&config(), &query).is_err());
+    }
+
+    #[test]
+    fn organization_policy_uses_exact_dns_label_boundaries() {
+        let policy = OrganizationDomainPolicy::new(
+            Some("tenant_domain".to_owned()),
+            vec!["Example.Test".to_owned()],
+        )
+        .unwrap();
+
+        for domain in ["example.test", "engineering.example.test"] {
+            let claims =
+                HashMap::from([("tenant_domain".to_owned(), Value::String(domain.to_owned()))]);
+            assert!(policy.admits(&claims), "expected {domain} to be admitted");
+        }
+
+        for domain in ["evilexample.test", "example.test.evil"] {
+            let claims =
+                HashMap::from([("tenant_domain".to_owned(), Value::String(domain.to_owned()))]);
+            assert!(!policy.admits(&claims), "expected {domain} to be denied");
+        }
+    }
+
+    #[test]
+    fn organization_policy_denies_missing_or_non_string_claims() {
+        let policy = OrganizationDomainPolicy::new(
+            Some("tenant_domain".to_owned()),
+            vec!["example.test".to_owned()],
+        )
+        .unwrap();
+
+        assert!(!policy.admits(&HashMap::new()));
+        assert!(!policy.admits(&HashMap::from([(
+            "tenant_domain".to_owned(),
+            Value::Array(Vec::new()),
+        )])));
+    }
+
+    #[test]
+    fn organization_policy_requires_a_complete_valid_configuration() {
+        assert!(OrganizationDomainPolicy::new(None, Vec::new()).is_ok());
+        assert!(OrganizationDomainPolicy::new(Some("hd".to_owned()), Vec::new()).is_err());
+        assert!(OrganizationDomainPolicy::new(None, vec!["example.test".to_owned()]).is_err());
+        assert!(
+            OrganizationDomainPolicy::new(
+                Some("hd".to_owned()),
+                vec!["*.example.test".to_owned()],
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

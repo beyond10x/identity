@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
-use daemonloom_identity::{AppState, Config, Store, discover_upstream, router};
+use daemonloom_identity::{
+    AppState, Config, OrganizationDomainPolicy, Store, discover_upstream, router,
+};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use url::Url;
@@ -64,12 +66,30 @@ fn config_from_environment() -> Result<Config> {
         upstream_issuer: required_issuer("IDENTITY_UPSTREAM_ISSUER")?,
         upstream_client_id: required("IDENTITY_UPSTREAM_CLIENT_ID")?,
         upstream_client_secret: required("IDENTITY_UPSTREAM_CLIENT_SECRET")?,
+        organization_domain_policy: organization_domain_policy()?,
         database_url: optional_database_url()?,
         database_path: PathBuf::from(
             env::var("IDENTITY_DATABASE_PATH")
                 .unwrap_or_else(|_| "/var/lib/daemonloom-identity/identity.sqlite3".to_owned()),
         ),
     })
+}
+
+fn organization_domain_policy() -> Result<OrganizationDomainPolicy> {
+    let claim = env::var("IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let allowed_base_domains = env::var("IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect();
+    OrganizationDomainPolicy::new(claim, allowed_base_domains).context(
+        "IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM and \
+         IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS do not form a valid policy",
+    )
 }
 
 fn optional_database_url() -> Result<Option<String>> {
