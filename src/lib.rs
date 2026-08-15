@@ -1,14 +1,17 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
-use axum::extract::{Form, Query, State};
+use axum::extract::{DefaultBodyLimit, Form, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
 use axum::routing::{get, post};
@@ -32,12 +35,32 @@ const LOGIN_LIFETIME_SECONDS: i64 = 10 * 60;
 const CODE_LIFETIME_SECONDS: i64 = 60;
 const SESSION_IDLE_SECONDS: i64 = 24 * 60 * 60;
 const SESSION_ABSOLUTE_SECONDS: i64 = 30 * 24 * 60 * 60;
-const CONNECTORS_AUDIENCE: &str = "daemonloom.connectors";
+const ACCESS_TOKEN_LIFETIME_SECONDS: i64 = 5 * 60;
+const MAX_LOGIN_TRANSACTIONS: i64 = 4_096;
+const MAX_AUTHORIZATION_CODES: i64 = 4_096;
+const MAX_SESSIONS: i64 = 100_000;
+const MAX_ACCESS_TOKENS: i64 = 100_000;
+const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
+const POSTGRES_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECTORS_AUDIENCE: &str = "urn:daemonloom:connectors";
+const CONNECTORS_SCOPES: [&str; 9] = [
+    "connectors.audit.read",
+    "connectors.catalog.read",
+    "connectors.channels.manage",
+    "connectors.connections.manage",
+    "connectors.deliveries.manage",
+    "connectors.events.read",
+    "connectors.grants.manage",
+    "connectors.integrations.manage",
+    "connectors.invoke",
+];
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
     pub public_origin: Url,
+    /// Trusted hosted Connector API base published to native clients after Identity discovery.
+    pub connectors_endpoint: Option<Url>,
     pub tenant_id: String,
     pub cli_client_id: String,
     pub upstream_issuer: String,
@@ -46,6 +69,45 @@ pub struct Config {
     pub organization_domain_policy: OrganizationDomainPolicy,
     pub database_url: Option<String>,
     pub database_path: PathBuf,
+}
+
+impl Config {
+    fn issuer(&self) -> &str {
+        self.public_origin.as_str().trim_end_matches('/')
+    }
+
+    /// A deterministic identity configuration binding for durable login sessions.
+    ///
+    /// A deployment must require users to authenticate again after any authority-defining
+    /// configuration changes. Secrets are deliberately excluded from this digest.
+    fn configuration_generation(&self) -> String {
+        let mut digest = Sha256::new();
+        for field in [
+            self.issuer(),
+            &self.tenant_id,
+            &self.cli_client_id,
+            &self.upstream_issuer,
+            self.connectors_endpoint
+                .as_ref()
+                .map_or("", url::Url::as_str),
+            self.organization_domain_policy
+                .claim
+                .as_deref()
+                .unwrap_or(""),
+        ] {
+            digest.update((field.len() as u64).to_be_bytes());
+            digest.update(field.as_bytes());
+        }
+        for domain in &self.organization_domain_policy.allowed_base_domains {
+            digest.update((domain.len() as u64).to_be_bytes());
+            digest.update(domain.as_bytes());
+        }
+        let mut generation = String::with_capacity(64);
+        for byte in digest.finalize() {
+            write!(generation, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        generation
+    }
 }
 
 /// Restricts logins using a domain claim from the cryptographically verified upstream ID token.
@@ -171,7 +233,101 @@ impl AppState {
 #[derive(Clone)]
 pub enum Store {
     Sqlite(Arc<Mutex<Connection>>),
-    Postgres(Arc<tokio_postgres::Client>),
+    Postgres(Arc<PostgresStore>),
+}
+
+/// Reconnectable PostgreSQL state. Public only because it is carried by the public `Store` enum;
+/// callers construct stores through `Store::connect_postgres`.
+#[doc(hidden)]
+pub struct PostgresStore {
+    url: String,
+    client: tokio::sync::Mutex<Option<Arc<tokio_postgres::Client>>>,
+    capacity_admission: tokio::sync::Mutex<()>,
+}
+
+impl PostgresStore {
+    async fn client(&self) -> Result<Arc<tokio_postgres::Client>> {
+        let mut slot = self.client.lock().await;
+        if let Some(client) = slot.as_ref().filter(|client| !client.is_closed()) {
+            return Ok(client.clone());
+        }
+
+        let tls = tokio_postgres_rustls::MakeRustlsConnect::with_webpki_roots();
+        let (client, connection) = tokio::time::timeout(
+            POSTGRES_CONNECT_TIMEOUT,
+            tokio_postgres::connect(&self.url, tls),
+        )
+        .await
+        .context("identity PostgreSQL connection deadline elapsed")?
+        .context("connect to identity PostgreSQL database")?;
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                tracing::error!(%error, "identity PostgreSQL connection failed");
+            }
+        });
+        initialize_postgres(&client).await?;
+        let client = Arc::new(client);
+        *slot = Some(client.clone());
+        Ok(client)
+    }
+}
+
+async fn initialize_postgres(client: &tokio_postgres::Client) -> Result<()> {
+    client
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS login_transactions (
+               upstream_state TEXT PRIMARY KEY,
+               created_at BIGINT NOT NULL,
+               client_id TEXT NOT NULL,
+               redirect_uri TEXT NOT NULL,
+               client_state TEXT NOT NULL,
+               client_nonce TEXT NOT NULL,
+               client_code_challenge TEXT NOT NULL,
+               upstream_nonce TEXT NOT NULL,
+               upstream_pkce_verifier TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS authorization_codes (
+               code_hash BYTEA PRIMARY KEY,
+               created_at BIGINT NOT NULL,
+               client_id TEXT NOT NULL,
+               redirect_uri TEXT NOT NULL,
+               code_challenge TEXT NOT NULL,
+               subject TEXT NOT NULL,
+               email TEXT
+             );
+             CREATE TABLE IF NOT EXISTS sessions (
+               verifier_hash BYTEA PRIMARY KEY,
+               issuer TEXT NOT NULL,
+               configuration_generation TEXT NOT NULL,
+               tenant_id TEXT NOT NULL,
+               subject TEXT NOT NULL,
+               email TEXT,
+               created_at BIGINT NOT NULL,
+               last_used_at BIGINT NOT NULL,
+               idle_expires_at BIGINT NOT NULL,
+               absolute_expires_at BIGINT NOT NULL,
+               revoked_at BIGINT
+             );
+             ALTER TABLE sessions ADD COLUMN IF NOT EXISTS issuer TEXT NOT NULL DEFAULT '';
+             ALTER TABLE sessions ADD COLUMN IF NOT EXISTS configuration_generation TEXT NOT NULL DEFAULT '';
+             CREATE TABLE IF NOT EXISTS access_tokens (
+               verifier_hash BYTEA PRIMARY KEY,
+               issuer TEXT NOT NULL,
+               subject TEXT NOT NULL,
+               audience TEXT NOT NULL,
+               issued_at BIGINT NOT NULL,
+               not_before BIGINT NOT NULL,
+               expires_at BIGINT NOT NULL,
+               token_id TEXT NOT NULL UNIQUE,
+               actor_subject TEXT NOT NULL,
+               scope TEXT NOT NULL,
+               principal_kind TEXT NOT NULL,
+               tenant_id TEXT NOT NULL,
+               revoked_at BIGINT
+             );",
+        )
+        .await
+        .context("initialize identity PostgreSQL schema")
 }
 
 impl Store {
@@ -182,12 +338,26 @@ impl Store {
     /// Returns an error when the parent directory, database, or schema cannot be created.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
+            let existed = parent.exists();
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create identity data directory {}", parent.display()))?;
+            if !existed {
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                    .with_context(|| {
+                        format!("protect identity data directory {}", parent.display())
+                    })?;
+            }
+            validate_private_state_path(parent, true)?;
+        }
+        if path.exists() {
+            validate_private_state_path(path, false)?;
         }
         let connection = Connection::open(path)
             .with_context(|| format!("open identity database {}", path.display()))?;
-        Self::from_sqlite_connection(connection)
+        let store = Self::from_sqlite_connection(connection)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("protect identity database {}", path.display()))?;
+        Ok(store)
     }
 
     /// Connects to `PostgreSQL` and applies the identity schema.
@@ -196,52 +366,13 @@ impl Store {
     ///
     /// Returns an error when the database cannot be connected or initialized.
     pub async fn connect_postgres(url: &str) -> Result<Self> {
-        let tls = tokio_postgres_rustls::MakeRustlsConnect::with_webpki_roots();
-        let (client, connection) = tokio_postgres::connect(url, tls)
-            .await
-            .context("connect to identity PostgreSQL database")?;
-        tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                tracing::error!(%error, "identity PostgreSQL connection failed");
-            }
+        let store = Arc::new(PostgresStore {
+            url: url.to_owned(),
+            client: tokio::sync::Mutex::new(None),
+            capacity_admission: tokio::sync::Mutex::new(()),
         });
-        client
-            .batch_execute(
-                "CREATE TABLE IF NOT EXISTS login_transactions (
-                   upstream_state TEXT PRIMARY KEY,
-                   created_at BIGINT NOT NULL,
-                   client_id TEXT NOT NULL,
-                   redirect_uri TEXT NOT NULL,
-                   client_state TEXT NOT NULL,
-                   client_nonce TEXT NOT NULL,
-                   client_code_challenge TEXT NOT NULL,
-                   upstream_nonce TEXT NOT NULL,
-                   upstream_pkce_verifier TEXT NOT NULL
-                 );
-                 CREATE TABLE IF NOT EXISTS authorization_codes (
-                   code_hash BYTEA PRIMARY KEY,
-                   created_at BIGINT NOT NULL,
-                   client_id TEXT NOT NULL,
-                   redirect_uri TEXT NOT NULL,
-                   code_challenge TEXT NOT NULL,
-                   subject TEXT NOT NULL,
-                   email TEXT
-                 );
-                 CREATE TABLE IF NOT EXISTS sessions (
-                   verifier_hash BYTEA PRIMARY KEY,
-                   tenant_id TEXT NOT NULL,
-                   subject TEXT NOT NULL,
-                   email TEXT,
-                   created_at BIGINT NOT NULL,
-                   last_used_at BIGINT NOT NULL,
-                   idle_expires_at BIGINT NOT NULL,
-                   absolute_expires_at BIGINT NOT NULL,
-                   revoked_at BIGINT
-                 );",
-            )
-            .await
-            .context("initialize identity PostgreSQL schema")?;
-        Ok(Self::Postgres(Arc::new(client)))
+        store.client().await?;
+        Ok(Self::Postgres(store))
     }
 
     /// Creates an isolated in-memory store for tests.
@@ -279,6 +410,8 @@ impl Store {
              );
              CREATE TABLE IF NOT EXISTS sessions (
                verifier_hash BLOB PRIMARY KEY,
+               issuer TEXT NOT NULL,
+               configuration_generation TEXT NOT NULL,
                tenant_id TEXT NOT NULL,
                subject TEXT NOT NULL,
                email TEXT,
@@ -287,12 +420,46 @@ impl Store {
                idle_expires_at INTEGER NOT NULL,
                absolute_expires_at INTEGER NOT NULL,
                revoked_at INTEGER
+             );
+             CREATE TABLE IF NOT EXISTS access_tokens (
+               verifier_hash BLOB PRIMARY KEY,
+               issuer TEXT NOT NULL,
+               subject TEXT NOT NULL,
+               audience TEXT NOT NULL,
+               issued_at INTEGER NOT NULL,
+               not_before INTEGER NOT NULL,
+               expires_at INTEGER NOT NULL,
+               token_id TEXT NOT NULL UNIQUE,
+               actor_subject TEXT NOT NULL,
+               scope TEXT NOT NULL,
+               principal_kind TEXT NOT NULL,
+               tenant_id TEXT NOT NULL,
+               revoked_at INTEGER
              );",
+        )?;
+        ensure_sqlite_column(
+            &connection,
+            "sessions",
+            "issuer",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        ensure_sqlite_column(
+            &connection,
+            "sessions",
+            "configuration_generation",
+            "TEXT NOT NULL DEFAULT ''",
         )?;
         Ok(Self::Sqlite(Arc::new(Mutex::new(connection))))
     }
 
     async fn put_login(&self, login: &LoginTransaction) -> Result<()> {
+        let _capacity_admission = self.capacity_admission().await;
+        self.prepare_insert(
+            login.created_at,
+            "login_transactions",
+            MAX_LOGIN_TRANSACTIONS,
+        )
+        .await?;
         match self {
             Self::Sqlite(_) => {
                 self.sqlite_connection()?.execute(
@@ -313,7 +480,8 @@ impl Store {
                     ],
                 )?;
             }
-            Self::Postgres(client) => {
+            Self::Postgres(store) => {
+                let client = store.client().await?;
                 client
                     .execute(
                         "INSERT INTO login_transactions (
@@ -363,8 +531,9 @@ impl Store {
                 )
                 .optional()
                 .map_err(Into::into),
-            Self::Postgres(client) => client
-                .query_opt(
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                client.query_opt(
                     "DELETE FROM login_transactions WHERE upstream_state = $1
                      RETURNING upstream_state, created_at, client_id, redirect_uri, client_state,
                                client_nonce, client_code_challenge, upstream_nonce, upstream_pkce_verifier",
@@ -384,11 +553,19 @@ impl Store {
                         upstream_pkce_verifier: row.get(8),
                     })
                 })
-                .map_err(Into::into),
+                .map_err(Into::into)
+            }
         }
     }
 
     async fn put_code(&self, code: &str, authorization: &PendingAuthorization) -> Result<()> {
+        let _capacity_admission = self.capacity_admission().await;
+        self.prepare_insert(
+            authorization.created_at,
+            "authorization_codes",
+            MAX_AUTHORIZATION_CODES,
+        )
+        .await?;
         let digest = hash(code);
         match self {
             Self::Sqlite(_) => {
@@ -407,7 +584,8 @@ impl Store {
                     ],
                 )?;
             }
-            Self::Postgres(client) => {
+            Self::Postgres(store) => {
+                let client = store.client().await?;
                 client
                     .execute(
                         "INSERT INTO authorization_codes (
@@ -451,24 +629,27 @@ impl Store {
                 )
                 .optional()
                 .map_err(Into::into),
-            Self::Postgres(client) => client
-                .query_opt(
-                    "DELETE FROM authorization_codes WHERE code_hash = $1
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                client
+                    .query_opt(
+                        "DELETE FROM authorization_codes WHERE code_hash = $1
                      RETURNING created_at, client_id, redirect_uri, code_challenge, subject, email",
-                    &[&digest],
-                )
-                .await
-                .map(|row| {
-                    row.map(|row| PendingAuthorization {
-                        created_at: row.get(0),
-                        client_id: row.get(1),
-                        redirect_uri: row.get(2),
-                        code_challenge: row.get(3),
-                        subject: row.get(4),
-                        email: row.get(5),
+                        &[&digest],
+                    )
+                    .await
+                    .map(|row| {
+                        row.map(|row| PendingAuthorization {
+                            created_at: row.get(0),
+                            client_id: row.get(1),
+                            redirect_uri: row.get(2),
+                            code_challenge: row.get(3),
+                            subject: row.get(4),
+                            email: row.get(5),
+                        })
                     })
-                })
-                .map_err(Into::into),
+                    .map_err(Into::into)
+            }
         }
     }
 
@@ -479,6 +660,8 @@ impl Store {
         identity: &Identity,
     ) -> Result<()> {
         let now = unix_time()?;
+        let _capacity_admission = self.capacity_admission().await;
+        self.prepare_insert(now, "sessions", MAX_SESSIONS).await?;
         let digest = hash(credential);
         let idle_expires_at = now + SESSION_IDLE_SECONDS;
         let absolute_expires_at = now + SESSION_ABSOLUTE_SECONDS;
@@ -486,11 +669,13 @@ impl Store {
             Self::Sqlite(_) => {
                 self.sqlite_connection()?.execute(
                     "INSERT INTO sessions (
-                       verifier_hash, tenant_id, subject, email, created_at, last_used_at,
-                       idle_expires_at, absolute_expires_at, revoked_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, NULL)",
+                       verifier_hash, issuer, configuration_generation, tenant_id, subject, email,
+                       created_at, last_used_at, idle_expires_at, absolute_expires_at, revoked_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9, NULL)",
                     params![
                         digest.as_slice(),
+                        config.issuer(),
+                        config.configuration_generation(),
                         config.tenant_id,
                         identity.subject,
                         identity.email,
@@ -500,15 +685,19 @@ impl Store {
                     ],
                 )?;
             }
-            Self::Postgres(client) => {
+            Self::Postgres(store) => {
+                let client = store.client().await?;
                 client
                     .execute(
                         "INSERT INTO sessions (
-                           verifier_hash, tenant_id, subject, email, created_at, last_used_at,
-                           idle_expires_at, absolute_expires_at, revoked_at
-                         ) VALUES ($1, $2, $3, $4, $5, $5, $6, $7, NULL)",
+                           verifier_hash, issuer, configuration_generation, tenant_id, subject,
+                           email, created_at, last_used_at, idle_expires_at, absolute_expires_at,
+                           revoked_at
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9, NULL)",
                         &[
                             &digest,
+                            &config.issuer(),
+                            &config.configuration_generation(),
                             &config.tenant_id,
                             &identity.subject,
                             &identity.email,
@@ -523,10 +712,15 @@ impl Store {
         Ok(())
     }
 
-    async fn resolve_session(&self, credential: &str) -> Result<Option<AdmittedSession>> {
+    async fn resolve_session(
+        &self,
+        credential: &str,
+        config: &Config,
+    ) -> Result<Option<AdmittedSession>> {
         let now = unix_time()?;
         let digest = hash(credential);
         let idle_expires_at = now + SESSION_IDLE_SECONDS;
+        let generation = config.configuration_generation();
         match self {
             Self::Sqlite(_) => self
                 .sqlite_connection()?
@@ -535,11 +729,21 @@ impl Store {
                      SET last_used_at = ?2,
                          idle_expires_at = min(?3, absolute_expires_at)
                      WHERE verifier_hash = ?1
+                       AND issuer = ?4
+                       AND configuration_generation = ?5
+                       AND tenant_id = ?6
                        AND revoked_at IS NULL
                        AND idle_expires_at > ?2
                        AND absolute_expires_at > ?2
                      RETURNING tenant_id, subject, email, idle_expires_at",
-                    params![digest.as_slice(), now, idle_expires_at],
+                    params![
+                        digest.as_slice(),
+                        now,
+                        idle_expires_at,
+                        config.issuer(),
+                        generation,
+                        config.tenant_id,
+                    ],
                     |row| {
                         Ok(AdmittedSession {
                             tenant_id: row.get(0)?,
@@ -551,28 +755,297 @@ impl Store {
                 )
                 .optional()
                 .map_err(Into::into),
-            Self::Postgres(client) => client
-                .query_opt(
-                    "UPDATE sessions
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                client
+                    .query_opt(
+                        "UPDATE sessions
                      SET last_used_at = $2,
                          idle_expires_at = LEAST($3, absolute_expires_at)
                      WHERE verifier_hash = $1
+                       AND issuer = $4
+                       AND configuration_generation = $5
+                       AND tenant_id = $6
                        AND revoked_at IS NULL
                        AND idle_expires_at > $2
                        AND absolute_expires_at > $2
                      RETURNING tenant_id, subject, email, idle_expires_at",
-                    &[&digest, &now, &idle_expires_at],
+                        &[
+                            &digest,
+                            &now,
+                            &idle_expires_at,
+                            &config.issuer(),
+                            &generation,
+                            &config.tenant_id,
+                        ],
+                    )
+                    .await
+                    .map(|row| {
+                        row.map(|row| AdmittedSession {
+                            tenant_id: row.get(0),
+                            subject: row.get(1),
+                            email: row.get(2),
+                            expires_at: row.get(3),
+                        })
+                    })
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    async fn put_access_token(&self, credential: &str, authority: &AccessAuthority) -> Result<()> {
+        let _capacity_admission = self.capacity_admission().await;
+        self.prepare_insert(authority.iat, "access_tokens", MAX_ACCESS_TOKENS)
+            .await?;
+        let digest = hash(credential);
+        match self {
+            Self::Sqlite(_) => {
+                self.sqlite_connection()?.execute(
+                    "INSERT INTO access_tokens (
+                       verifier_hash, issuer, subject, audience, issued_at, not_before, expires_at,
+                       token_id, actor_subject, scope, principal_kind, tenant_id, revoked_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL)",
+                    params![
+                        digest.as_slice(),
+                        authority.iss,
+                        authority.sub,
+                        authority.aud,
+                        authority.iat,
+                        authority.nbf,
+                        authority.exp,
+                        authority.jti,
+                        authority.act.sub,
+                        authority.scope,
+                        authority.dl_principal_kind,
+                        authority.dl_tenant,
+                    ],
+                )?;
+            }
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                client
+                    .execute(
+                        "INSERT INTO access_tokens (
+                           verifier_hash, issuer, subject, audience, issued_at, not_before,
+                           expires_at, token_id, actor_subject, scope, principal_kind, tenant_id,
+                           revoked_at
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL)",
+                        &[
+                            &digest,
+                            &authority.iss,
+                            &authority.sub,
+                            &authority.aud,
+                            &authority.iat,
+                            &authority.nbf,
+                            &authority.exp,
+                            &authority.jti,
+                            &authority.act.sub,
+                            &authority.scope,
+                            &authority.dl_principal_kind,
+                            &authority.dl_tenant,
+                        ],
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn resolve_access_token(
+        &self,
+        credential: &str,
+        audience: &str,
+    ) -> Result<Option<AccessAuthority>> {
+        let now = unix_time()?;
+        let digest = hash(credential);
+        match self {
+            Self::Sqlite(_) => self
+                .sqlite_connection()?
+                .query_row(
+                    "SELECT issuer, subject, audience, issued_at, not_before, expires_at, token_id,
+                            actor_subject, scope, principal_kind, tenant_id
+                     FROM access_tokens
+                     WHERE verifier_hash = ?1 AND audience = ?2 AND revoked_at IS NULL
+                       AND not_before <= ?3 AND expires_at > ?3",
+                    params![digest.as_slice(), audience, now],
+                    access_authority_from_sqlite_row,
+                )
+                .optional()
+                .map_err(Into::into),
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                client.query_opt(
+                    "SELECT issuer, subject, audience, issued_at, not_before, expires_at, token_id,
+                            actor_subject, scope, principal_kind, tenant_id
+                     FROM access_tokens
+                     WHERE verifier_hash = $1 AND audience = $2 AND revoked_at IS NULL
+                       AND not_before <= $3 AND expires_at > $3",
+                    &[&digest, &audience, &now],
                 )
                 .await
                 .map(|row| {
-                    row.map(|row| AdmittedSession {
-                        tenant_id: row.get(0),
-                        subject: row.get(1),
-                        email: row.get(2),
-                        expires_at: row.get(3),
+                    row.map(|row| AccessAuthority {
+                        iss: row.get(0),
+                        sub: row.get(1),
+                        aud: row.get(2),
+                        iat: row.get(3),
+                        nbf: row.get(4),
+                        exp: row.get(5),
+                        jti: row.get(6),
+                        act: Actor { sub: row.get(7) },
+                        scope: row.get(8),
+                        dl_principal_kind: row.get(9),
+                        dl_tenant: row.get(10),
                     })
                 })
-                .map_err(Into::into),
+                .map_err(Into::into)
+            }
+        }
+    }
+
+    async fn revoke_session_and_subject_tokens(
+        &self,
+        credential: &str,
+        subject: &str,
+    ) -> Result<bool> {
+        let now = unix_time()?;
+        let digest = hash(credential);
+        let changed = match self {
+            Self::Sqlite(_) => {
+                let connection = self.sqlite_connection()?;
+                let changed = connection.execute(
+                    "UPDATE sessions SET revoked_at = ?2
+                     WHERE verifier_hash = ?1 AND revoked_at IS NULL",
+                    params![digest.as_slice(), now],
+                )?;
+                connection.execute(
+                    "UPDATE access_tokens SET revoked_at = ?2
+                     WHERE subject = ?1 AND revoked_at IS NULL",
+                    params![subject, now],
+                )?;
+                changed
+            }
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                let changed = client
+                    .execute(
+                        "UPDATE sessions SET revoked_at = $2
+                         WHERE verifier_hash = $1 AND revoked_at IS NULL",
+                        &[&digest, &now],
+                    )
+                    .await?;
+                client
+                    .execute(
+                        "UPDATE access_tokens SET revoked_at = $2
+                         WHERE subject = $1 AND revoked_at IS NULL",
+                        &[&subject, &now],
+                    )
+                    .await?;
+                usize::try_from(changed).unwrap_or(usize::MAX)
+            }
+        };
+        Ok(changed > 0)
+    }
+
+    async fn ready(&self) -> Result<()> {
+        match self {
+            Self::Sqlite(_) => {
+                self.sqlite_connection()?
+                    .query_row("SELECT 1", [], |_| Ok(()))?;
+            }
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                client.simple_query("SELECT 1").await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn prepare_insert(&self, now: i64, table: &str, maximum: i64) -> Result<()> {
+        let (sqlite_count, postgres_count) = match table {
+            "login_transactions" => (
+                "SELECT count(*) FROM login_transactions",
+                "SELECT count(*)::BIGINT FROM login_transactions",
+            ),
+            "authorization_codes" => (
+                "SELECT count(*) FROM authorization_codes",
+                "SELECT count(*)::BIGINT FROM authorization_codes",
+            ),
+            "sessions" => (
+                "SELECT count(*) FROM sessions",
+                "SELECT count(*)::BIGINT FROM sessions",
+            ),
+            "access_tokens" => (
+                "SELECT count(*) FROM access_tokens",
+                "SELECT count(*)::BIGINT FROM access_tokens",
+            ),
+            _ => bail!("unknown identity capacity table"),
+        };
+        let count = match self {
+            Self::Sqlite(_) => {
+                let connection = self.sqlite_connection()?;
+                connection.execute(
+                    "DELETE FROM login_transactions WHERE created_at <= ?1",
+                    [now - LOGIN_LIFETIME_SECONDS],
+                )?;
+                connection.execute(
+                    "DELETE FROM authorization_codes WHERE created_at <= ?1",
+                    [now - CODE_LIFETIME_SECONDS],
+                )?;
+                connection.execute(
+                    "DELETE FROM sessions
+                     WHERE absolute_expires_at <= ?1 OR revoked_at IS NOT NULL",
+                    [now],
+                )?;
+                connection.execute(
+                    "DELETE FROM access_tokens WHERE expires_at <= ?1 OR revoked_at IS NOT NULL",
+                    [now],
+                )?;
+                connection.query_row(sqlite_count, [], |row| row.get::<_, i64>(0))?
+            }
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                client
+                    .execute(
+                        "DELETE FROM login_transactions WHERE created_at <= $1",
+                        &[&(now - LOGIN_LIFETIME_SECONDS)],
+                    )
+                    .await?;
+                client
+                    .execute(
+                        "DELETE FROM authorization_codes WHERE created_at <= $1",
+                        &[&(now - CODE_LIFETIME_SECONDS)],
+                    )
+                    .await?;
+                client
+                    .execute(
+                        "DELETE FROM sessions
+                         WHERE absolute_expires_at <= $1 OR revoked_at IS NOT NULL",
+                        &[&now],
+                    )
+                    .await?;
+                client
+                    .execute(
+                        "DELETE FROM access_tokens WHERE expires_at <= $1 OR revoked_at IS NOT NULL",
+                        &[&now],
+                    )
+                    .await?;
+                client
+                    .query_one(postgres_count, &[])
+                    .await?
+                    .get::<_, i64>(0)
+            }
+        };
+        if count >= maximum {
+            bail!("identity {table} capacity of {maximum} records is exhausted");
+        }
+        Ok(())
+    }
+
+    async fn capacity_admission(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        match self {
+            Self::Sqlite(_) => None,
+            Self::Postgres(store) => Some(store.capacity_admission.lock().await),
         }
     }
 
@@ -584,6 +1057,22 @@ impl Store {
             Self::Postgres(_) => Err(anyhow::anyhow!("identity store is not SQLite")),
         }
     }
+}
+
+fn access_authority_from_sqlite_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccessAuthority> {
+    Ok(AccessAuthority {
+        iss: row.get(0)?,
+        sub: row.get(1)?,
+        aud: row.get(2)?,
+        iat: row.get(3)?,
+        nbf: row.get(4)?,
+        exp: row.get(5)?,
+        jti: row.get(6)?,
+        act: Actor { sub: row.get(7)? },
+        scope: row.get(8)?,
+        dl_principal_kind: row.get(9)?,
+        dl_tenant: row.get(10)?,
+    })
 }
 
 #[derive(Debug)]
@@ -648,6 +1137,8 @@ struct LoginMetadata {
     issuer: String,
     authorization_endpoint: String,
     token_endpoint: String,
+    access_token_endpoint: String,
+    connectors_endpoint: Option<String>,
     cli_client_id: String,
     response_types_supported: [&'static str; 1],
     grant_types_supported: [&'static str; 1],
@@ -672,14 +1163,42 @@ struct AdmittedSession {
     expires_at: i64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccessTokenRequest {
+    audience: String,
+    scope: String,
+}
+
 #[derive(Debug, Serialize)]
-struct SessionVerificationResponse {
-    active: bool,
-    audience: &'static str,
-    tenant_id: String,
-    subject: String,
-    email: Option<String>,
+struct AccessTokenResponse {
+    access_token: String,
+    token_type: &'static str,
     expires_in: i64,
+    audience: String,
+    scope: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Actor {
+    sub: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AccessAuthority {
+    iss: String,
+    sub: String,
+    aud: String,
+    iat: i64,
+    nbf: i64,
+    exp: i64,
+    jti: String,
+    act: Actor,
+    scope: String,
+    dl_principal_kind: String,
+    dl_tenant: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -754,17 +1273,32 @@ pub async fn discover_upstream(
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/healthz", get(health))
+        .route("/livez", get(liveness))
+        .route("/readyz", get(readiness))
+        .route("/healthz", get(readiness))
         .route("/.well-known/daemonloom-cli-login", get(login_metadata))
         .route("/oauth/authorize", get(authorize))
         .route("/oauth/callback/upstream", get(upstream_callback))
         .route("/oauth/token", post(exchange_token))
-        .route("/v1/session", get(verify_session))
+        .route("/v1/access-token", post(issue_access_token))
+        .route("/v1/access-authority", get(verify_access_token))
+        .route("/v1/logout", post(logout))
+        .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
         .with_state(state)
 }
 
-async fn health() -> &'static str {
+async fn liveness() -> &'static str {
     "ok\n"
+}
+
+async fn readiness(State(state): State<AppState>) -> Response {
+    match state.store.ready().await {
+        Ok(()) => (StatusCode::OK, "ok\n").into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "identity readiness check failed");
+            (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response()
+        }
+    }
 }
 
 async fn login_metadata(State(state): State<AppState>) -> Json<LoginMetadata> {
@@ -773,6 +1307,12 @@ async fn login_metadata(State(state): State<AppState>) -> Json<LoginMetadata> {
         issuer: origin.to_owned(),
         authorization_endpoint: format!("{origin}/oauth/authorize"),
         token_endpoint: format!("{origin}/oauth/token"),
+        access_token_endpoint: format!("{origin}/v1/access-token"),
+        connectors_endpoint: state
+            .config
+            .connectors_endpoint
+            .as_ref()
+            .map(|endpoint| endpoint.as_str().to_owned()),
         cli_client_id: state.config.cli_client_id.clone(),
         response_types_supported: ["code"],
         grant_types_supported: ["authorization_code"],
@@ -780,38 +1320,110 @@ async fn login_metadata(State(state): State<AppState>) -> Json<LoginMetadata> {
     })
 }
 
-async fn verify_session(
+async fn issue_access_token(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<SessionVerificationResponse>, HttpError> {
-    let audience = headers
-        .get("x-daemonloom-audience")
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| HttpError::denied("an exact Daemonloom audience is required"))?;
-    if audience != CONNECTORS_AUDIENCE {
+    Json(request): Json<AccessTokenRequest>,
+) -> Result<Response, HttpError> {
+    if request.audience != CONNECTORS_AUDIENCE {
         return Err(HttpError::denied("the requested audience is not admitted"));
     }
-    let credential = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| valid_session_credential(value))
+    let scope = bootstrap_connector_scope(&request.scope)?;
+    let credential = bearer(&headers, valid_session_credential)
         .ok_or_else(|| HttpError::denied("a valid Identity session is required"))?;
     let admitted = state
         .store
-        .resolve_session(credential)
+        .resolve_session(credential, &state.config)
         .await
         .map_err(HttpError::internal)?
         .ok_or_else(|| HttpError::denied("the Identity session is expired or revoked"))?;
     let now = unix_time().map_err(HttpError::internal)?;
-    Ok(Json(SessionVerificationResponse {
-        active: true,
-        audience: CONNECTORS_AUDIENCE,
-        tenant_id: admitted.tenant_id,
-        subject: admitted.subject,
-        email: admitted.email,
-        expires_in: admitted.expires_at.saturating_sub(now),
+    let credential = format!(
+        "dl_access_v1_{}",
+        random_token(32).map_err(HttpError::internal)?
+    );
+    let authority = AccessAuthority {
+        iss: state
+            .config
+            .public_origin
+            .as_str()
+            .trim_end_matches('/')
+            .to_owned(),
+        sub: admitted.subject.clone(),
+        aud: CONNECTORS_AUDIENCE.to_owned(),
+        iat: now,
+        nbf: now,
+        exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
+        jti: format!(
+            "dl_jti_v1_{}",
+            random_token(16).map_err(HttpError::internal)?
+        ),
+        act: Actor {
+            sub: admitted.subject,
+        },
+        scope: scope.clone(),
+        dl_principal_kind: "human".to_owned(),
+        dl_tenant: admitted.tenant_id,
+    };
+    let _ = admitted.email;
+    let _ = admitted.expires_at;
+    state
+        .store
+        .put_access_token(&credential, &authority)
+        .await
+        .map_err(HttpError::internal)?;
+    Ok(confidential_json(AccessTokenResponse {
+        access_token: credential,
+        token_type: "Bearer",
+        expires_in: ACCESS_TOKEN_LIFETIME_SECONDS,
+        audience: authority.aud,
+        scope,
     }))
+}
+
+async fn verify_access_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    let audience = headers
+        .get("x-daemonloom-audience")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| *value == CONNECTORS_AUDIENCE)
+        .ok_or_else(|| HttpError::denied("an exact admitted audience is required"))?;
+    let credential = bearer(&headers, valid_access_credential)
+        .ok_or_else(|| HttpError::denied("a valid short-lived access token is required"))?;
+    let authority = state
+        .store
+        .resolve_access_token(credential, audience)
+        .await
+        .map_err(HttpError::internal)?
+        .ok_or_else(|| HttpError::denied("the access token is expired or revoked"))?;
+    Ok(confidential_json(authority))
+}
+
+async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, HttpError> {
+    let credential = bearer(&headers, valid_session_credential)
+        .ok_or_else(|| HttpError::denied("a valid Identity session is required"))?;
+    let admitted = state
+        .store
+        .resolve_session(credential, &state.config)
+        .await
+        .map_err(HttpError::internal)?
+        .ok_or_else(|| HttpError::denied("the Identity session is expired or revoked"))?;
+    if !state
+        .store
+        .revoke_session_and_subject_tokens(credential, &admitted.subject)
+        .await
+        .map_err(HttpError::internal)?
+    {
+        return Err(HttpError::denied(
+            "the Identity session is expired or revoked",
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn authorize(
@@ -976,7 +1588,7 @@ async fn upstream_callback(
 async fn exchange_token(
     State(state): State<AppState>,
     Form(request): Form<TokenRequest>,
-) -> Result<Json<SessionResponse>, HttpError> {
+) -> Result<Response, HttpError> {
     if request.grant_type != "authorization_code" {
         return Err(HttpError::invalid("grant_type must be authorization_code"));
     }
@@ -1010,7 +1622,7 @@ async fn exchange_token(
         .put_session(&credential, &state.config, &identity)
         .await
         .map_err(HttpError::internal)?;
-    Ok(Json(SessionResponse {
+    Ok(confidential_json(SessionResponse {
         session: credential,
         session_type: "opaque_server_session",
         expires_in: SESSION_IDLE_SECONDS,
@@ -1018,6 +1630,17 @@ async fn exchange_token(
         subject: identity.subject,
         email: identity.email,
     }))
+}
+
+fn confidential_json<T: Serialize>(value: T) -> Response {
+    (
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        Json(value),
+    )
+        .into_response()
 }
 
 fn validate_authorization_request(
@@ -1086,6 +1709,54 @@ fn valid_session_credential(value: &str) -> bool {
         .is_some_and(|token| valid_b64_token(token, 43, 43))
 }
 
+fn valid_access_credential(value: &str) -> bool {
+    value
+        .strip_prefix("dl_access_v1_")
+        .is_some_and(|token| valid_b64_token(token, 43, 43))
+}
+
+fn bearer(headers: &HeaderMap, validator: fn(&str) -> bool) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .filter(|credential| validator(credential))
+}
+
+fn canonical_connector_scope(value: &str) -> Result<String, HttpError> {
+    if value.is_empty() || value.len() > 1024 {
+        return Err(HttpError::invalid("a bounded Connector scope is required"));
+    }
+    let requested = value.split_ascii_whitespace().collect::<Vec<_>>();
+    if requested.is_empty() || requested.join(" ") != value {
+        return Err(HttpError::invalid(
+            "Connector scopes must use one canonical ASCII-space separator",
+        ));
+    }
+    let scopes = requested.iter().copied().collect::<BTreeSet<_>>();
+    if scopes.len() != requested.len()
+        || scopes
+            .iter()
+            .any(|scope| !CONNECTORS_SCOPES.contains(scope))
+    {
+        return Err(HttpError::denied(
+            "the requested Connector scope set is not admitted",
+        ));
+    }
+    Ok(scopes.into_iter().collect::<Vec<_>>().join(" "))
+}
+
+fn bootstrap_connector_scope(value: &str) -> Result<String, HttpError> {
+    let scope = canonical_connector_scope(value)?;
+    if scope != "connectors.catalog.read" {
+        return Err(HttpError::denied(
+            "this bootstrap admits only authenticated Connector catalog discovery; receiver-owned Grant and management authorization are not implemented",
+        ));
+    }
+    Ok(scope)
+}
+
 fn pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(hash(verifier))
 }
@@ -1099,6 +1770,61 @@ fn random_token(bytes: usize) -> Result<String> {
 
 fn hash(value: &str) -> Vec<u8> {
     Sha256::digest(value.as_bytes()).to_vec()
+}
+
+fn ensure_sqlite_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    declaration: &str,
+) -> Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(());
+        }
+    }
+    connection.execute_batch(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+    ))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_private_state_path(path: &Path, directory: bool) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect identity state path {}", path.display()))?;
+    if metadata.file_type().is_symlink()
+        || (directory && !metadata.is_dir())
+        || (!directory && !metadata.is_file())
+    {
+        bail!(
+            "identity state path {} must be a non-symlink {}",
+            path.display(),
+            if directory {
+                "directory"
+            } else {
+                "regular file"
+            }
+        );
+    }
+    if metadata.uid() != nix::unistd::getuid().as_raw() {
+        bail!("identity state path {} has the wrong owner", path.display());
+    }
+    let forbidden = if directory { 0o077 } else { 0o177 };
+    if metadata.permissions().mode() & forbidden != 0 {
+        bail!(
+            "identity state path {} grants access outside its owner",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_private_state_path(_path: &Path, _directory: bool) -> Result<()> {
+    bail!("filesystem-backed Identity state requires Unix ownership enforcement")
 }
 
 fn unix_time() -> Result<i64> {
@@ -1126,6 +1852,9 @@ mod tests {
         Config {
             listen: "127.0.0.1:0".parse().unwrap(),
             public_origin: Url::parse("http://127.0.0.1:8080/").unwrap(),
+            connectors_endpoint: Some(
+                Url::parse("https://code.example.test/api/connectors/v1").unwrap(),
+            ),
             tenant_id: "tenant-dev".to_owned(),
             cli_client_id: "daemonloom-harness-cli".to_owned(),
             upstream_issuer: "https://accounts.example.test".to_owned(),
@@ -1265,22 +1994,94 @@ mod tests {
     #[tokio::test]
     async fn session_resolution_is_bearer_bound_and_refreshes_only_live_sessions() {
         let store = Store::in_memory().unwrap();
+        let config = config();
         let identity = Identity {
             subject: "google-subject".to_owned(),
             email: Some("developer@example.test".to_owned()),
         };
         let credential = format!("dl_session_v1_{}", "a".repeat(43));
         store
-            .put_session(&credential, &config(), &identity)
+            .put_session(&credential, &config, &identity)
             .await
             .unwrap();
 
-        let admitted = store.resolve_session(&credential).await.unwrap().unwrap();
+        let admitted = store
+            .resolve_session(&credential, &config)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(admitted.tenant_id, "tenant-dev");
         assert_eq!(admitted.subject, "google-subject");
         assert!(
             store
-                .resolve_session("dl_session_v1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .resolve_session(
+                    "dl_session_v1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    &config,
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_are_configuration_bound_and_logout_revokes_access() {
+        let store = Store::in_memory().unwrap();
+        let config = config();
+        let identity = Identity {
+            subject: "google-subject".to_owned(),
+            email: None,
+        };
+        let credential = format!("dl_session_v1_{}", "c".repeat(43));
+        store
+            .put_session(&credential, &config, &identity)
+            .await
+            .unwrap();
+
+        let mut changed = config.clone();
+        changed.tenant_id = "different-tenant".to_owned();
+        assert!(
+            store
+                .resolve_session(&credential, &changed)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let now = unix_time().unwrap();
+        let authority = AccessAuthority {
+            iss: config.issuer().to_owned(),
+            sub: identity.subject.clone(),
+            aud: CONNECTORS_AUDIENCE.to_owned(),
+            iat: now,
+            nbf: now,
+            exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
+            jti: "dl_jti_v1_logout".to_owned(),
+            act: Actor {
+                sub: identity.subject.clone(),
+            },
+            scope: "connectors.catalog.read".to_owned(),
+            dl_principal_kind: "human".to_owned(),
+            dl_tenant: config.tenant_id.clone(),
+        };
+        let access = format!("dl_access_v1_{}", "d".repeat(43));
+        store.put_access_token(&access, &authority).await.unwrap();
+        assert!(
+            store
+                .revoke_session_and_subject_tokens(&credential, &identity.subject)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .resolve_session(&credential, &config)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .resolve_access_token(&access, CONNECTORS_AUDIENCE)
                 .await
                 .unwrap()
                 .is_none()
@@ -1298,5 +2099,86 @@ mod tests {
             "dl_session_v2_{}",
             "a".repeat(43)
         )));
+    }
+
+    #[tokio::test]
+    async fn access_authority_is_short_lived_audience_bound_and_hash_stored() {
+        let store = Store::in_memory().unwrap();
+        let now = unix_time().unwrap();
+        let authority = AccessAuthority {
+            iss: "https://identity.example.test".to_owned(),
+            sub: "google-subject".to_owned(),
+            aud: CONNECTORS_AUDIENCE.to_owned(),
+            iat: now,
+            nbf: now,
+            exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
+            jti: "dl_jti_v1_test".to_owned(),
+            act: Actor {
+                sub: "google-subject".to_owned(),
+            },
+            scope: "connectors.catalog.read connectors.invoke".to_owned(),
+            dl_principal_kind: "human".to_owned(),
+            dl_tenant: "tenant-dev".to_owned(),
+        };
+        let credential = format!("dl_access_v1_{}", "a".repeat(43));
+        store
+            .put_access_token(&credential, &authority)
+            .await
+            .unwrap();
+        let raw_count: i64 = store
+            .sqlite_connection()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM access_tokens WHERE verifier_hash = ?1",
+                [credential.as_bytes()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_count, 0);
+        let resolved = store
+            .resolve_access_token(&credential, CONNECTORS_AUDIENCE)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved, authority);
+        assert!(
+            store
+                .resolve_access_token(&credential, "urn:daemonloom:substrate")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn connector_scope_vocabulary_is_exact_and_canonical() {
+        assert_eq!(
+            canonical_connector_scope("connectors.invoke connectors.catalog.read").unwrap(),
+            "connectors.catalog.read connectors.invoke"
+        );
+        for invalid in [
+            "connectors.catalog.read  connectors.invoke",
+            "connectors.catalog.read connectors.catalog.read",
+            "connectors.admin",
+        ] {
+            assert!(canonical_connector_scope(invalid).is_err());
+        }
+        assert!(valid_access_credential(&format!(
+            "dl_access_v1_{}",
+            "a".repeat(43)
+        )));
+        assert!(!valid_access_credential("dl_access_v1_short"));
+        assert_eq!(
+            bootstrap_connector_scope("connectors.catalog.read").unwrap(),
+            "connectors.catalog.read"
+        );
+        assert!(bootstrap_connector_scope("connectors.invoke").is_err());
+    }
+
+    #[test]
+    fn credential_responses_are_explicitly_non_cacheable() {
+        let response = confidential_json(serde_json::json!({"secret": "redacted"}));
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()[header::PRAGMA], "no-cache");
     }
 }

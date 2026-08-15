@@ -3,6 +3,7 @@
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
@@ -24,6 +25,8 @@ async fn main() -> Result<()> {
     let config = Arc::new(config_from_environment()?);
     let http_client = openidconnect::reqwest::ClientBuilder::new()
         .redirect(openidconnect::reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15))
         .build()
         .context("build OIDC HTTP client")?;
     let upstream = discover_upstream(&config, &http_client).await?;
@@ -60,6 +63,7 @@ fn config_from_environment() -> Result<Config> {
     Ok(Config {
         listen,
         public_origin,
+        connectors_endpoint: optional_connectors_endpoint()?,
         tenant_id: required("IDENTITY_TENANT_ID")?,
         cli_client_id: env::var("IDENTITY_CLI_CLIENT_ID")
             .unwrap_or_else(|_| "daemonloom-harness-cli".to_owned()),
@@ -73,6 +77,36 @@ fn config_from_environment() -> Result<Config> {
                 .unwrap_or_else(|_| "/var/lib/daemonloom-identity/identity.sqlite3".to_owned()),
         ),
     })
+}
+
+fn optional_connectors_endpoint() -> Result<Option<Url>> {
+    let Some(value) = env::var("IDENTITY_CONNECTORS_ENDPOINT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    normalize_connectors_endpoint(&value).map(Some)
+}
+
+fn normalize_connectors_endpoint(value: &str) -> Result<Url> {
+    let endpoint =
+        Url::parse(value).context("IDENTITY_CONNECTORS_ENDPOINT must be an absolute HTTPS URL")?;
+    if endpoint.scheme() != "https"
+        || endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.path() == "/"
+        || endpoint.path().contains("//")
+        || endpoint.path().ends_with('/')
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        bail!(
+            "IDENTITY_CONNECTORS_ENDPOINT must be a closed HTTPS API base without credentials, query, fragment, or trailing slash"
+        );
+    }
+    Ok(endpoint)
 }
 
 fn organization_domain_policy() -> Result<OrganizationDomainPolicy> {
@@ -206,7 +240,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::database_url_from_parts;
+    use super::{database_url_from_parts, normalize_connectors_endpoint};
 
     #[test]
     fn database_parts_are_safely_encoded() {
@@ -224,5 +258,18 @@ mod tests {
             url,
             "postgresql://identity%20user:p%40ss%3A%2F%3F%23%5B%5D!@postgresql.example.test:5432/identity%20database?sslmode=verify-full"
         );
+    }
+
+    #[test]
+    fn connector_discovery_endpoint_is_a_closed_https_base() {
+        assert!(normalize_connectors_endpoint("https://code.example/api/connectors/v1").is_ok());
+        for endpoint in [
+            "http://code.example/api/connectors/v1",
+            "https://user@code.example/api/connectors/v1",
+            "https://code.example/api/connectors/v1/",
+            "https://code.example/api/connectors/v1?next=evil",
+        ] {
+            assert!(normalize_connectors_endpoint(endpoint).is_err());
+        }
     }
 }
