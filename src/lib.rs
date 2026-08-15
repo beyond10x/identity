@@ -44,6 +44,7 @@ const MAX_ACCESS_TOKENS: i64 = 100_000;
 const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
 const POSTGRES_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECTORS_AUDIENCE: &str = "urn:daemonloom:connectors";
+const STATUS_AUDIENCE: &str = "urn:daemonloom:status";
 const CONNECTORS_SCOPES: [&str; 9] = [
     "connectors.audit.read",
     "connectors.catalog.read",
@@ -94,10 +95,14 @@ pub struct Config {
     pub connectors_endpoint: Option<Url>,
     pub tenant_id: String,
     pub cli_client_id: String,
+    /// Exact browser clients admitted by this Identity deployment.
+    pub web_clients: Vec<WebClient>,
     pub upstream_issuer: String,
     pub upstream_client_id: String,
     pub upstream_client_secret: SecretValue,
     pub organization_domain_policy: OrganizationDomainPolicy,
+    /// Deployment-owned, immediately effective human-to-group assignments.
+    pub static_group_memberships: StaticGroupMemberships,
     pub database_url: Option<SecretValue>,
     pub database_path: PathBuf,
 }
@@ -133,12 +138,154 @@ impl Config {
             digest.update((domain.len() as u64).to_be_bytes());
             digest.update(domain.as_bytes());
         }
+        for client in &self.web_clients {
+            for field in [client.client_id.as_str(), client.redirect_uri.as_str()] {
+                digest.update((field.len() as u64).to_be_bytes());
+                digest.update(field.as_bytes());
+            }
+        }
         let mut generation = String::with_capacity(64);
         for byte in digest.finalize() {
             write!(generation, "{byte:02x}").expect("writing to a String cannot fail");
         }
         generation
     }
+}
+
+/// One exact browser authorization client. Browser clients remain public clients and must use
+/// S256 PKCE; this registration only expands redirect admission beyond the native loopback flow.
+#[derive(Debug, Clone)]
+pub struct WebClient {
+    client_id: String,
+    redirect_uri: Url,
+}
+
+impl WebClient {
+    /// Validates a public browser client and its one exact HTTPS callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the client ID is malformed or the redirect is not one exact,
+    /// credential-free HTTPS callback URL.
+    pub fn new(client_id: &str, redirect_uri: &str) -> Result<Self> {
+        let client_id = client_id.trim().to_owned();
+        if !(3..=128).contains(&client_id.len())
+            || !client_id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+        {
+            bail!("Identity web client IDs must use 3-128 URL-safe ASCII characters");
+        }
+        let redirect_uri = Url::parse(redirect_uri)
+            .context("Identity web client redirect URI must be an absolute URL")?;
+        if redirect_uri.scheme() != "https"
+            || redirect_uri.host_str().is_none()
+            || !redirect_uri.username().is_empty()
+            || redirect_uri.password().is_some()
+            || redirect_uri.path() == "/"
+            || redirect_uri.query().is_some()
+            || redirect_uri.fragment().is_some()
+        {
+            bail!(
+                "Identity web client redirect URI must be an exact HTTPS path without credentials, query, or fragment"
+            );
+        }
+        Ok(Self {
+            client_id,
+            redirect_uri,
+        })
+    }
+}
+
+/// Static deployment configuration that maps verified upstream emails into authorization groups.
+/// Group resolution is performed for every authority request, so a configuration rollout takes
+/// effect without persisting roles in an application database.
+#[derive(Debug, Clone, Default)]
+pub struct StaticGroupMemberships {
+    by_tenant_and_email: HashMap<(String, String), Vec<String>>,
+}
+
+impl StaticGroupMemberships {
+    /// Validates exact email-to-group assignments and rejects ambiguous duplicate identities.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed emails, malformed or empty groups, or duplicate normalized
+    /// email assignments.
+    pub fn new(entries: Vec<(String, String, Vec<String>)>) -> Result<Self> {
+        let mut by_tenant_and_email = HashMap::new();
+        for (tenant_id, email, groups) in entries {
+            let tenant_id = tenant_id.trim().to_owned();
+            if !(1..=128).contains(&tenant_id.len())
+                || !tenant_id.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+                })
+            {
+                bail!("Identity static group tenant IDs must be bounded URL-safe ASCII");
+            }
+            let email = normalize_email(&email)?;
+            let groups = groups
+                .into_iter()
+                .map(|group| group.trim().to_ascii_lowercase())
+                .collect::<BTreeSet<_>>();
+            if groups.is_empty()
+                || groups.iter().any(|group| {
+                    !(1..=64).contains(&group.len())
+                        || !group.bytes().enumerate().all(|(index, byte)| {
+                            byte.is_ascii_lowercase()
+                                || byte.is_ascii_digit() && index > 0
+                                || matches!(byte, b'-' | b'_') && index > 0
+                        })
+                })
+            {
+                bail!(
+                    "Identity static groups must be non-empty lowercase names of at most 64 characters"
+                );
+            }
+            if by_tenant_and_email
+                .insert(
+                    (tenant_id.clone(), email.clone()),
+                    groups.into_iter().collect(),
+                )
+                .is_some()
+            {
+                bail!(
+                    "Identity static group membership repeats tenant {tenant_id} and email {email}"
+                );
+            }
+        }
+        Ok(Self {
+            by_tenant_and_email,
+        })
+    }
+
+    fn groups_for(&self, tenant_id: &str, email: Option<&str>) -> Vec<String> {
+        email
+            .and_then(|email| normalize_email(email).ok())
+            .and_then(|email| {
+                self.by_tenant_and_email
+                    .get(&(tenant_id.to_owned(), email))
+                    .cloned()
+            })
+            .unwrap_or_default()
+    }
+}
+
+fn normalize_email(value: &str) -> Result<String> {
+    let email = value.trim().to_ascii_lowercase();
+    let mut parts = email.split('@');
+    let local = parts.next().unwrap_or_default();
+    let domain = parts.next().unwrap_or_default();
+    if email.len() > 254
+        || local.is_empty()
+        || domain.is_empty()
+        || parts.next().is_some()
+        || email.chars().any(char::is_whitespace)
+        || !email.is_ascii()
+    {
+        bail!("Identity static group emails must be bounded ASCII mailbox addresses");
+    }
+    Ok(email)
 }
 
 /// Restricts logins using a domain claim from the cryptographically verified upstream ID token.
@@ -1186,6 +1333,18 @@ struct SessionResponse {
     email: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SessionAuthority {
+    iss: String,
+    sub: String,
+    aud: &'static str,
+    exp: i64,
+    email: Option<String>,
+    dl_tenant: String,
+    groups: Vec<String>,
+}
+
 #[derive(Debug)]
 struct AdmittedSession {
     tenant_id: String,
@@ -1311,6 +1470,7 @@ pub fn router(state: AppState) -> Router {
         .route("/oauth/authorize", get(authorize))
         .route("/oauth/callback/upstream", get(upstream_callback))
         .route("/oauth/token", post(exchange_token))
+        .route("/v1/session-authority", get(session_authority))
         .route("/v1/access-token", post(issue_access_token))
         .route("/v1/access-authority", get(verify_access_token))
         .route("/v1/logout", post(logout))
@@ -1409,6 +1569,38 @@ async fn issue_access_token(
         expires_in: ACCESS_TOKEN_LIFETIME_SECONDS,
         audience: authority.aud,
         scope,
+    }))
+}
+
+async fn session_authority(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    headers
+        .get("x-daemonloom-audience")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| *value == STATUS_AUDIENCE)
+        .ok_or_else(|| HttpError::denied("an exact admitted audience is required"))?;
+    let credential = bearer(&headers, valid_session_credential)
+        .ok_or_else(|| HttpError::denied("a valid Identity session is required"))?;
+    let admitted = state
+        .store
+        .resolve_session(credential, &state.config)
+        .await
+        .map_err(HttpError::internal)?
+        .ok_or_else(|| HttpError::denied("the Identity session is expired or revoked"))?;
+    let groups = state
+        .config
+        .static_group_memberships
+        .groups_for(&admitted.tenant_id, admitted.email.as_deref());
+    Ok(confidential_json(SessionAuthority {
+        iss: state.config.issuer().to_owned(),
+        sub: admitted.subject,
+        aud: STATUS_AUDIENCE,
+        exp: admitted.expires_at,
+        email: admitted.email,
+        dl_tenant: admitted.tenant_id,
+        groups,
     }))
 }
 
@@ -1681,10 +1873,17 @@ fn validate_authorization_request(
     if query.response_type != "code" {
         return Err(HttpError::invalid("response_type must be code"));
     }
-    if query.client_id != config.cli_client_id {
-        return Err(HttpError::denied("unknown client_id"));
+    if query.client_id == config.cli_client_id {
+        validate_loopback_redirect(&query.redirect_uri)?;
+    } else {
+        let admitted = config.web_clients.iter().any(|client| {
+            client.client_id == query.client_id
+                && client.redirect_uri.as_str() == query.redirect_uri
+        });
+        if !admitted {
+            return Err(HttpError::denied("unknown client_id or redirect_uri"));
+        }
     }
-    validate_loopback_redirect(&query.redirect_uri)?;
     let scopes = query.scope.split_ascii_whitespace().collect::<HashSet<_>>();
     if !scopes.contains("openid") {
         return Err(HttpError::invalid("scope must contain openid"));
@@ -1888,10 +2087,23 @@ mod tests {
             ),
             tenant_id: "tenant-dev".to_owned(),
             cli_client_id: "daemonloom-harness-cli".to_owned(),
+            web_clients: vec![
+                WebClient::new(
+                    "daemonloom-status",
+                    "https://code.example.test/status/oauth/callback",
+                )
+                .unwrap(),
+            ],
             upstream_issuer: "https://accounts.example.test".to_owned(),
             upstream_client_id: "upstream-client".to_owned(),
             upstream_client_secret: SecretValue::new("not-a-real-secret".to_owned()),
             organization_domain_policy: OrganizationDomainPolicy::default(),
+            static_group_memberships: StaticGroupMemberships::new(vec![(
+                "tenant-dev".to_owned(),
+                "operator@example.test".to_owned(),
+                vec!["operator".to_owned()],
+            )])
+            .unwrap(),
             database_url: None,
             database_path: PathBuf::new(),
         }
@@ -1928,6 +2140,56 @@ mod tests {
         query = authorization_query();
         query.code_challenge_method = "plain".to_owned();
         assert!(validate_authorization_request(&config(), &query).is_err());
+    }
+
+    #[test]
+    fn authorization_accepts_only_the_registered_web_callback() {
+        let mut query = authorization_query();
+        query.client_id = "daemonloom-status".to_owned();
+        query.redirect_uri = "https://code.example.test/status/oauth/callback".to_owned();
+        validate_authorization_request(&config(), &query).unwrap();
+
+        query.redirect_uri = "https://code.example.test/status/attacker".to_owned();
+        assert!(validate_authorization_request(&config(), &query).is_err());
+    }
+
+    #[test]
+    fn static_groups_are_exact_normalized_and_deterministic() {
+        let groups = StaticGroupMemberships::new(vec![(
+            "tenant-a".to_owned(),
+            " Operator@Example.Test ".to_owned(),
+            vec!["operator".to_owned(), "platform-read".to_owned()],
+        )])
+        .unwrap();
+        assert_eq!(
+            groups.groups_for("tenant-a", Some("operator@example.test")),
+            vec!["operator", "platform-read"]
+        );
+        assert!(
+            groups
+                .groups_for("tenant-b", Some("operator@example.test"))
+                .is_empty()
+        );
+        assert!(
+            groups
+                .groups_for("tenant-a", Some("other@example.test"))
+                .is_empty()
+        );
+        assert!(
+            StaticGroupMemberships::new(vec![
+                (
+                    "tenant-a".to_owned(),
+                    "operator@example.test".to_owned(),
+                    vec!["operator".to_owned()]
+                ),
+                (
+                    "tenant-a".to_owned(),
+                    "OPERATOR@example.test".to_owned(),
+                    vec!["other".to_owned()]
+                ),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

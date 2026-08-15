@@ -8,8 +8,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use daemonloom_identity::{
-    AppState, Config, OrganizationDomainPolicy, SecretValue, Store, discover_upstream, router,
+    AppState, Config, OrganizationDomainPolicy, SecretValue, StaticGroupMemberships, Store,
+    WebClient, discover_upstream, router,
 };
+use serde::Deserialize;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use url::Url;
@@ -67,16 +69,57 @@ fn config_from_environment() -> Result<Config> {
         tenant_id: required("IDENTITY_TENANT_ID")?,
         cli_client_id: env::var("IDENTITY_CLI_CLIENT_ID")
             .unwrap_or_else(|_| "daemonloom-harness-cli".to_owned()),
+        web_clients: web_clients()?,
         upstream_issuer: required_issuer("IDENTITY_UPSTREAM_ISSUER")?,
         upstream_client_id: required("IDENTITY_UPSTREAM_CLIENT_ID")?,
         upstream_client_secret: required_secret("IDENTITY_UPSTREAM_CLIENT_SECRET")?,
         organization_domain_policy: organization_domain_policy()?,
+        static_group_memberships: static_group_memberships()?,
         database_url: optional_database_url()?,
         database_path: PathBuf::from(
             env::var("IDENTITY_DATABASE_PATH")
                 .unwrap_or_else(|_| "/var/lib/daemonloom-identity/identity.sqlite3".to_owned()),
         ),
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WebClientConfig {
+    client_id: String,
+    redirect_uri: String,
+}
+
+fn web_clients() -> Result<Vec<WebClient>> {
+    let source = env::var("IDENTITY_WEB_CLIENTS_JSON").unwrap_or_else(|_| "[]".to_owned());
+    let clients: Vec<WebClientConfig> = serde_json::from_str(&source)
+        .context("IDENTITY_WEB_CLIENTS_JSON must be a JSON array of exact public clients")?;
+    clients
+        .into_iter()
+        .map(|client| WebClient::new(&client.client_id, &client.redirect_uri))
+        .collect()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StaticGroupMembershipConfig {
+    tenant_id: String,
+    email: String,
+    groups: Vec<String>,
+}
+
+fn static_group_memberships() -> Result<StaticGroupMemberships> {
+    let source =
+        env::var("IDENTITY_STATIC_GROUP_MEMBERSHIPS_JSON").unwrap_or_else(|_| "[]".to_owned());
+    let memberships: Vec<StaticGroupMembershipConfig> = serde_json::from_str(&source).context(
+        "IDENTITY_STATIC_GROUP_MEMBERSHIPS_JSON must be a JSON array of tenant-scoped email assignments",
+    )?;
+    StaticGroupMemberships::new(
+        memberships
+            .into_iter()
+            .map(|membership| (membership.tenant_id, membership.email, membership.groups))
+            .collect(),
+    )
 }
 
 fn optional_connectors_endpoint() -> Result<Option<Url>> {

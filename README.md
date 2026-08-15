@@ -83,6 +83,21 @@ IDENTITY_DATABASE_PATH=/tmp/daemonloom-identity/private/identity.sqlite3 \
 cargo run --locked
 ```
 
+Browser applications are registered as exact public PKCE clients. Static group assignments are
+deployment configuration evaluated against the verified upstream email on every authority lookup;
+they are not copied into application databases or browser cookies. For example:
+
+```bash
+IDENTITY_WEB_CLIENTS_JSON='[{"clientId":"daemonloom-status","redirectUri":"https://code.example.test/status/oauth/callback"}]'
+IDENTITY_STATIC_GROUP_MEMBERSHIPS_JSON='[{"tenantId":"local","email":"operator@example.test","groups":["operator"]}]'
+```
+
+An internal application may resolve the current Identity session with `GET
+/v1/session-authority`, an Identity session bearer, and the exact
+`x-daemonloom-audience: urn:daemonloom:status` header. The no-store response contains the verified
+subject, email, tenant, expiry, and current static groups. This endpoint is intended for an
+allowlisted in-cluster caller; it does not turn groups into independently reusable access tokens.
+
 The organization policy is optional, but the claim and allowlist must be configured together. It
 reads only the cryptographically verified upstream ID token. Each configured base domain admits
 the exact domain and label-bound subdomains; `evilexample.com` does not match `example.com`. With
