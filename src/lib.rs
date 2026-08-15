@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use axum::extract::{Form, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
 use axum::routing::{get, post};
 use base64::Engine;
@@ -32,6 +32,7 @@ const LOGIN_LIFETIME_SECONDS: i64 = 10 * 60;
 const CODE_LIFETIME_SECONDS: i64 = 60;
 const SESSION_IDLE_SECONDS: i64 = 24 * 60 * 60;
 const SESSION_ABSOLUTE_SECONDS: i64 = 30 * 24 * 60 * 60;
+const CONNECTORS_AUDIENCE: &str = "daemonloom.connectors";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -522,6 +523,59 @@ impl Store {
         Ok(())
     }
 
+    async fn resolve_session(&self, credential: &str) -> Result<Option<AdmittedSession>> {
+        let now = unix_time()?;
+        let digest = hash(credential);
+        let idle_expires_at = now + SESSION_IDLE_SECONDS;
+        match self {
+            Self::Sqlite(_) => self
+                .sqlite_connection()?
+                .query_row(
+                    "UPDATE sessions
+                     SET last_used_at = ?2,
+                         idle_expires_at = min(?3, absolute_expires_at)
+                     WHERE verifier_hash = ?1
+                       AND revoked_at IS NULL
+                       AND idle_expires_at > ?2
+                       AND absolute_expires_at > ?2
+                     RETURNING tenant_id, subject, email, idle_expires_at",
+                    params![digest.as_slice(), now, idle_expires_at],
+                    |row| {
+                        Ok(AdmittedSession {
+                            tenant_id: row.get(0)?,
+                            subject: row.get(1)?,
+                            email: row.get(2)?,
+                            expires_at: row.get(3)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(Into::into),
+            Self::Postgres(client) => client
+                .query_opt(
+                    "UPDATE sessions
+                     SET last_used_at = $2,
+                         idle_expires_at = LEAST($3, absolute_expires_at)
+                     WHERE verifier_hash = $1
+                       AND revoked_at IS NULL
+                       AND idle_expires_at > $2
+                       AND absolute_expires_at > $2
+                     RETURNING tenant_id, subject, email, idle_expires_at",
+                    &[&digest, &now, &idle_expires_at],
+                )
+                .await
+                .map(|row| {
+                    row.map(|row| AdmittedSession {
+                        tenant_id: row.get(0),
+                        subject: row.get(1),
+                        email: row.get(2),
+                        expires_at: row.get(3),
+                    })
+                })
+                .map_err(Into::into),
+        }
+    }
+
     fn sqlite_connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         match self {
             Self::Sqlite(connection) => connection
@@ -610,6 +664,24 @@ struct SessionResponse {
     email: Option<String>,
 }
 
+#[derive(Debug)]
+struct AdmittedSession {
+    tenant_id: String,
+    subject: String,
+    email: Option<String>,
+    expires_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionVerificationResponse {
+    active: bool,
+    audience: &'static str,
+    tenant_id: String,
+    subject: String,
+    email: Option<String>,
+    expires_in: i64,
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorBody {
     error: &'static str,
@@ -687,6 +759,7 @@ pub fn router(state: AppState) -> Router {
         .route("/oauth/authorize", get(authorize))
         .route("/oauth/callback/upstream", get(upstream_callback))
         .route("/oauth/token", post(exchange_token))
+        .route("/v1/session", get(verify_session))
         .with_state(state)
 }
 
@@ -705,6 +778,40 @@ async fn login_metadata(State(state): State<AppState>) -> Json<LoginMetadata> {
         grant_types_supported: ["authorization_code"],
         code_challenge_methods_supported: ["S256"],
     })
+}
+
+async fn verify_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<SessionVerificationResponse>, HttpError> {
+    let audience = headers
+        .get("x-daemonloom-audience")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| HttpError::denied("an exact Daemonloom audience is required"))?;
+    if audience != CONNECTORS_AUDIENCE {
+        return Err(HttpError::denied("the requested audience is not admitted"));
+    }
+    let credential = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| valid_session_credential(value))
+        .ok_or_else(|| HttpError::denied("a valid Identity session is required"))?;
+    let admitted = state
+        .store
+        .resolve_session(credential)
+        .await
+        .map_err(HttpError::internal)?
+        .ok_or_else(|| HttpError::denied("the Identity session is expired or revoked"))?;
+    let now = unix_time().map_err(HttpError::internal)?;
+    Ok(Json(SessionVerificationResponse {
+        active: true,
+        audience: CONNECTORS_AUDIENCE,
+        tenant_id: admitted.tenant_id,
+        subject: admitted.subject,
+        email: admitted.email,
+        expires_in: admitted.expires_at.saturating_sub(now),
+    }))
 }
 
 async fn authorize(
@@ -973,6 +1080,12 @@ fn valid_b64_token(value: &str, minimum: usize, maximum: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
+fn valid_session_credential(value: &str) -> bool {
+    value
+        .strip_prefix("dl_session_v1_")
+        .is_some_and(|token| valid_b64_token(token, 43, 43))
+}
+
 fn pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(hash(verifier))
 }
@@ -1147,5 +1260,43 @@ mod tests {
             )
             .unwrap();
         assert_eq!(raw_count, 0);
+    }
+
+    #[tokio::test]
+    async fn session_resolution_is_bearer_bound_and_refreshes_only_live_sessions() {
+        let store = Store::in_memory().unwrap();
+        let identity = Identity {
+            subject: "google-subject".to_owned(),
+            email: Some("developer@example.test".to_owned()),
+        };
+        let credential = format!("dl_session_v1_{}", "a".repeat(43));
+        store
+            .put_session(&credential, &config(), &identity)
+            .await
+            .unwrap();
+
+        let admitted = store.resolve_session(&credential).await.unwrap().unwrap();
+        assert_eq!(admitted.tenant_id, "tenant-dev");
+        assert_eq!(admitted.subject, "google-subject");
+        assert!(
+            store
+                .resolve_session("dl_session_v1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn session_credential_shape_is_closed() {
+        assert!(valid_session_credential(&format!(
+            "dl_session_v1_{}",
+            "a".repeat(43)
+        )));
+        assert!(!valid_session_credential("dl_session_v1_short"));
+        assert!(!valid_session_credential(&format!(
+            "dl_session_v2_{}",
+            "a".repeat(43)
+        )));
     }
 }

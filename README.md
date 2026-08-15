@@ -25,6 +25,11 @@ the separately supplied `IDENTITY_DB_USER`, `IDENTITY_DB_PASSWORD`, `IDENTITY_DB
 `IDENTITY_DB_PORT`, `IDENTITY_DB_NAME`, and optional `IDENTITY_DB_PARAMS` fields. The latter form
 is used for provider-generated connection Secrets and safely URL-encodes credentials.
 
+Hosted Connectors verifies a user session through `GET /v1/session` with the exact
+`x-daemonloom-audience: daemonloom.connectors` header. The opaque bearer is resolved only against
+its stored SHA-256 verifier; a live match returns bounded principal and tenant metadata and renews
+the session's idle expiry. The endpoint does not return or accept an upstream provider token.
+
 ## Run locally
 
 Create a Google OAuth web client whose authorized redirect URI is exactly:
