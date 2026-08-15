@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use daemonloom_identity::{
-    AppState, Config, OrganizationDomainPolicy, Store, discover_upstream, router,
+    AppState, Config, OrganizationDomainPolicy, SecretValue, Store, discover_upstream, router,
 };
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -30,8 +30,8 @@ async fn main() -> Result<()> {
         .build()
         .context("build OIDC HTTP client")?;
     let upstream = discover_upstream(&config, &http_client).await?;
-    let store = match config.database_url.as_deref() {
-        Some(url) => Store::connect_postgres(url).await?,
+    let store = match config.database_url.as_ref() {
+        Some(url) => Store::connect_postgres(url.expose_secret()).await?,
         None => Store::open(&config.database_path)?,
     };
     let app: Router = router(AppState::new(config.clone(), upstream, http_client, store));
@@ -69,7 +69,7 @@ fn config_from_environment() -> Result<Config> {
             .unwrap_or_else(|_| "daemonloom-harness-cli".to_owned()),
         upstream_issuer: required_issuer("IDENTITY_UPSTREAM_ISSUER")?,
         upstream_client_id: required("IDENTITY_UPSTREAM_CLIENT_ID")?,
-        upstream_client_secret: required("IDENTITY_UPSTREAM_CLIENT_SECRET")?,
+        upstream_client_secret: required_secret("IDENTITY_UPSTREAM_CLIENT_SECRET")?,
         organization_domain_policy: organization_domain_policy()?,
         database_url: optional_database_url()?,
         database_path: PathBuf::from(
@@ -126,7 +126,7 @@ fn organization_domain_policy() -> Result<OrganizationDomainPolicy> {
     )
 }
 
-fn optional_database_url() -> Result<Option<String>> {
+fn optional_database_url() -> Result<Option<SecretValue>> {
     if let Some(value) = env::var("IDENTITY_DATABASE_URL")
         .ok()
         .filter(|value| !value.is_empty())
@@ -138,7 +138,7 @@ fn optional_database_url() -> Result<Option<String>> {
         if !matches!(url.scheme(), "postgres" | "postgresql") {
             bail!("IDENTITY_DATABASE_URL must use the postgres or postgresql scheme");
         }
-        return Ok(Some(value));
+        return Ok(Some(SecretValue::new(value)));
     }
 
     if !database_parts_are_present() {
@@ -179,7 +179,7 @@ fn database_url_from_parts(
     port: u16,
     database: &str,
     params: &str,
-) -> Result<String> {
+) -> Result<SecretValue> {
     let mut url = Url::parse("postgresql://localhost")?;
     url.set_username(user)
         .map_err(|()| anyhow::anyhow!("IDENTITY_DB_USER is not valid in a PostgreSQL URL"))?;
@@ -193,11 +193,15 @@ fn database_url_from_parts(
     if !params.is_empty() {
         url.set_query(Some(params));
     }
-    Ok(url.into())
+    Ok(SecretValue::new(url.into()))
 }
 
 fn required(name: &'static str) -> Result<String> {
     env::var(name).with_context(|| format!("{name} is required"))
+}
+
+fn required_secret(name: &'static str) -> Result<SecretValue> {
+    required(name).map(SecretValue::new)
 }
 
 fn required_url(name: &'static str) -> Result<Url> {
@@ -255,7 +259,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            url,
+            url.expose_secret(),
             "postgresql://identity%20user:p%40ss%3A%2F%3F%23%5B%5D!@postgresql.example.test:5432/identity%20database?sslmode=verify-full"
         );
     }

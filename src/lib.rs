@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
+use zeroize::Zeroizing;
 
 const LOGIN_LIFETIME_SECONDS: i64 = 10 * 60;
 const CODE_LIFETIME_SECONDS: i64 = 60;
@@ -55,6 +56,36 @@ const CONNECTORS_SCOPES: [&str; 9] = [
     "connectors.invoke",
 ];
 
+/// A credential-bearing value whose backing allocation is cleared on drop and whose
+/// diagnostic representation never includes the value.
+#[derive(Clone)]
+pub struct SecretValue(Zeroizing<String>);
+
+impl SecretValue {
+    #[must_use]
+    pub fn new(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
+
+    /// Deliberately exposes the value at the protocol boundary that consumes it.
+    #[must_use]
+    pub fn expose_secret(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Copies the value into a library type that must own its protocol input.
+    #[must_use]
+    pub fn expose_secret_owned(&self) -> String {
+        self.0.as_str().to_owned()
+    }
+}
+
+impl fmt::Debug for SecretValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SecretValue([REDACTED])")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
@@ -65,9 +96,9 @@ pub struct Config {
     pub cli_client_id: String,
     pub upstream_issuer: String,
     pub upstream_client_id: String,
-    pub upstream_client_secret: String,
+    pub upstream_client_secret: SecretValue,
     pub organization_domain_policy: OrganizationDomainPolicy,
-    pub database_url: Option<String>,
+    pub database_url: Option<SecretValue>,
     pub database_path: PathBuf,
 }
 
@@ -1443,7 +1474,7 @@ async fn authorize(
         (*state.upstream).clone(),
         ClientId::new(state.config.upstream_client_id.clone()),
         Some(ClientSecret::new(
-            state.config.upstream_client_secret.clone(),
+            state.config.upstream_client_secret.expose_secret_owned(),
         )),
     )
     .set_redirect_uri(RedirectUrl::new(callback.to_string()).map_err(HttpError::internal)?);
@@ -1519,7 +1550,7 @@ async fn upstream_callback(
         (*state.upstream).clone(),
         ClientId::new(state.config.upstream_client_id.clone()),
         Some(ClientSecret::new(
-            state.config.upstream_client_secret.clone(),
+            state.config.upstream_client_secret.expose_secret_owned(),
         )),
     )
     .set_redirect_uri(RedirectUrl::new(callback.to_string()).map_err(HttpError::internal)?);
@@ -1859,11 +1890,18 @@ mod tests {
             cli_client_id: "daemonloom-harness-cli".to_owned(),
             upstream_issuer: "https://accounts.example.test".to_owned(),
             upstream_client_id: "upstream-client".to_owned(),
-            upstream_client_secret: "not-a-real-secret".to_owned(),
+            upstream_client_secret: SecretValue::new("not-a-real-secret".to_owned()),
             organization_domain_policy: OrganizationDomainPolicy::default(),
             database_url: None,
             database_path: PathBuf::new(),
         }
+    }
+
+    #[test]
+    fn configuration_debug_redacts_secret_values() {
+        let rendered = format!("{:?}", config());
+        assert!(!rendered.contains("not-a-real-secret"));
+        assert!(rendered.contains("[REDACTED]"));
     }
 
     fn authorization_query() -> AuthorizeQuery {
