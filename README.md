@@ -42,9 +42,12 @@ pinning, not a credential or an access grant.
 
 Before a hosted Connector request, the native client presents its login-continuity session only to
 Identity at `POST /v1/access-token`. Identity returns a five-minute opaque access token with the
-exact `urn:daemonloom:connectors` audience. The bootstrap mints `connectors.catalog.read` for every
-authenticated principal. Principals mapped to the deployment's `operator` group may request the
-exact larger Connector scope set they need; the resolved group facts travel in the short-lived
+exact `urn:daemonloom:connectors` audience. Every authenticated principal may request
+`connectors.catalog.read` or `connectors.invoke` independently. Invocation remains
+receiver-authorized: hosted Connectors admits ordinary tenant members only to configured
+read-only module operations, while effect-bearing and non-module invocation remains behind its
+operator policy. Principals mapped to the deployment's `operator` group may request the exact
+larger Connector scope set they need; the resolved group facts travel in the short-lived
 authority envelope so Connectors can apply its independent receiver-owned management policy.
 Connectors then resolves that access token through `GET /v1/access-authority`; the result is the complete
 validated foundation envelope (`iss`, `sub`, `aud`, time window, `jti`, immediate actor, scopes,
@@ -93,9 +96,9 @@ IDENTITY_WEB_CLIENTS_JSON='[{"clientId":"daemonloom-status","redirectUri":"https
 IDENTITY_STATIC_GROUP_MEMBERSHIPS_JSON='[{"tenantId":"local","email":"operator@example.test","groups":["operator"]}]'
 ```
 
-An internal application may resolve the current Identity session with `GET
+An internal Status or Zwirn application may resolve the current Identity session with `GET
 /v1/session-authority`, an Identity session bearer, and the exact
-`x-daemonloom-audience: urn:daemonloom:status` header. The no-store response contains the verified
+`x-daemonloom-audience: urn:daemonloom:status` or `urn:daemonloom:zwirn` header. The no-store response contains the verified
 subject, email, tenant, expiry, and current static groups. This endpoint is intended for an
 allowlisted in-cluster caller; it does not turn groups into independently reusable access tokens.
 

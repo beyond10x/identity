@@ -49,6 +49,7 @@ const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
 const POSTGRES_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECTORS_AUDIENCE: &str = "urn:daemonloom:connectors";
 const STATUS_AUDIENCE: &str = "urn:daemonloom:status";
+const ZWIRN_AUDIENCE: &str = "urn:daemonloom:zwirn";
 const CONNECTORS_SCOPES: [&str; 9] = [
     "connectors.audit.read",
     "connectors.catalog.read",
@@ -1802,7 +1803,11 @@ async fn session_authority(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    let admitted = admitted_session_for_audience(&state, &headers, STATUS_AUDIENCE).await?;
+    let audience = [STATUS_AUDIENCE, ZWIRN_AUDIENCE]
+        .into_iter()
+        .find(|audience| audience_matches(&headers, audience))
+        .ok_or_else(|| HttpError::denied("an exact admitted audience is required"))?;
+    let admitted = admitted_session_for_audience(&state, &headers, audience).await?;
     let groups = state
         .config
         .static_group_memberships
@@ -1810,7 +1815,7 @@ async fn session_authority(
     Ok(confidential_json(SessionAuthority {
         iss: state.config.issuer().to_owned(),
         sub: admitted.subject,
-        aud: STATUS_AUDIENCE,
+        aud: audience,
         exp: admitted.expires_at,
         email: admitted.email,
         dl_tenant: admitted.tenant_id,
@@ -2204,7 +2209,11 @@ fn bootstrap_connector_scope(value: &str) -> Result<String, HttpError> {
 
 fn admitted_connector_scope(value: &str, groups: &[String]) -> Result<String, HttpError> {
     let scope = canonical_connector_scope(value)?;
-    if scope == "connectors.catalog.read" || groups.iter().any(|group| group == "operator") {
+    if matches!(
+        scope.as_str(),
+        "connectors.catalog.read" | "connectors.invoke"
+    ) || groups.iter().any(|group| group == "operator")
+    {
         return Ok(scope);
     }
     Err(HttpError::denied(
@@ -2935,6 +2944,10 @@ mod tests {
             .unwrap(),
             "connectors.catalog.read connectors.events.read connectors.invoke"
         );
+        assert_eq!(
+            admitted_connector_scope("connectors.invoke", &["member".to_owned()]).unwrap(),
+            "connectors.invoke"
+        );
         assert!(
             admitted_connector_scope(
                 "connectors.catalog.read connectors.invoke",
@@ -2949,6 +2962,7 @@ mod tests {
         let audiences = [
             CONNECTORS_AUDIENCE,
             STATUS_AUDIENCE,
+            ZWIRN_AUDIENCE,
             directory::DIRECTORY_AUDIENCE,
             profile::PROFILE_AUDIENCE,
             profile::PROFILE_PROJECTION_AUDIENCE,
