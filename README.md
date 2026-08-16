@@ -1,9 +1,16 @@
 # Daemonloom Identity
 
 This repository contains the first deployable human-login slice for Daemonloom. It owns upstream
-OpenID Connect login, one-tenant principal identity, opaque CLI sessions, and the server-side
+OpenID Connect login, tenant-scoped principal identity, opaque CLI sessions, and the server-side
 credential store. Product services such as the AI Agent Platform consume this identity; they do not
 run Google OAuth themselves.
+
+The supported Babelforce development deployment configures one organization. The implementation
+does not encode that deployment choice as a global tenant assumption: an exact mapping from a
+cryptographically verified upstream organization claim to `tenant_id` is resolved before an
+authorization code or session is created, and tenant plus subject remains the stable user key.
+Unknown, duplicate, non-string, and unmapped claims fail closed. See the
+[tenant-resolution decision](docs/decisions/0001-verified-organization-tenant-resolution.md).
 
 The implemented CLI flow is:
 
@@ -82,7 +89,7 @@ IDENTITY_UPSTREAM_ISSUER=https://accounts.google.com \
 IDENTITY_UPSTREAM_CLIENT_ID='your-client-id' \
 IDENTITY_UPSTREAM_CLIENT_SECRET='your-client-secret' \
 IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM=hd \
-IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS=example.com \
+IDENTITY_ORGANIZATION_TENANTS_JSON='[{"claimValue":"example.com","tenantId":"local"}]' \
 IDENTITY_DATABASE_PATH=/tmp/daemonloom-identity/private/identity.sqlite3 \
 cargo run --locked
 ```
@@ -107,7 +114,7 @@ allowlisted in-cluster caller; it does not turn groups into independently reusab
 Identity owns principals, so it also owns the organization directory that names them. A
 consuming product resolves a person or a set of people here instead of keeping its own copy.
 
-A **membership** records that a principal belongs to this deployment's tenant, its kind
+A **membership** records that a principal belongs to one resolved tenant, its kind
 (`human`, `agent`, or `service`), and whether it is `active` or `suspended`. A **group** names a set
 of members inside the same tenant.
 
@@ -193,11 +200,27 @@ Directory and profile tables are additive. Every statement is `CREATE TABLE`/`CR
 EXISTS`; no existing table, column, index, or row is altered, rewritten, or dropped, so the schema
 is safe to apply to a running deployment and an older binary keeps working against it unchanged.
 
-The organization policy is optional, but the claim and allowlist must be configured together. It
-reads only the cryptographically verified upstream ID token. Each configured base domain admits
-the exact domain and label-bound subdomains; `evilexample.com` does not match `example.com`. With
-Google Workspace, use the signed `hd` claim rather than inferring membership from the email
-address or the authorization request's `hd` hint.
+The organization policy reads only the cryptographically verified upstream ID token. Hosted
+multi-organization-ready configuration uses `IDENTITY_ORGANIZATION_TENANTS_JSON`, an array of
+exact `claimValue`/`tenantId` mappings, together with
+`IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM`. No suffix, email-domain, request-hint, or default
+tenant fallback is applied. The older base-domain allowlist remains mutually exclusive
+single-tenant compatibility configuration. With Google Workspace, use the signed `hd` claim rather
+than inferring membership from the email address or the authorization request's `hd` hint.
+
+For example, an isolation fixture can configure two exact organizations in one process:
+
+```bash
+IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM=hd
+IDENTITY_ORGANIZATION_TENANTS_JSON='[
+  {"claimValue":"alpha.example","tenantId":"tenant-alpha"},
+  {"claimValue":"beta.example","tenantId":"tenant-beta"}
+]'
+```
+
+Authorization codes, sessions, access authorities, static groups, directory rows, and profile rows
+all retain the resolved tenant. Downstream authority always carries both `tenant` and `sub`; a user
+identifier without its tenant is incomplete.
 
 Production configuration refuses a non-HTTPS public origin. Plain HTTP is accepted only for the
 literal `127.0.0.1` local-test origin.

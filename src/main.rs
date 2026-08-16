@@ -108,6 +108,13 @@ struct StaticGroupMembershipConfig {
     groups: Vec<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OrganizationTenantConfig {
+    claim_value: String,
+    tenant_id: String,
+}
+
 fn static_group_memberships() -> Result<StaticGroupMemberships> {
     let source =
         env::var("IDENTITY_STATIC_GROUP_MEMBERSHIPS_JSON").unwrap_or_else(|_| "[]".to_owned());
@@ -162,7 +169,30 @@ fn organization_domain_policy() -> Result<OrganizationDomainPolicy> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-        .collect();
+        .collect::<Vec<_>>();
+    if let Some(source) = env::var("IDENTITY_ORGANIZATION_TENANTS_JSON")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if !allowed_base_domains.is_empty() {
+            bail!(
+                "IDENTITY_ORGANIZATION_TENANTS_JSON and IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS are mutually exclusive"
+            );
+        }
+        let claim = claim.context(
+            "IDENTITY_ORGANIZATION_TENANTS_JSON requires IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM",
+        )?;
+        let mappings: Vec<OrganizationTenantConfig> = serde_json::from_str(&source).context(
+            "IDENTITY_ORGANIZATION_TENANTS_JSON must be an array of exact claimValue/tenantId mappings",
+        )?;
+        return OrganizationDomainPolicy::exact_tenant_mapping(
+            &claim,
+            mappings
+                .into_iter()
+                .map(|mapping| (mapping.claim_value, mapping.tenant_id))
+                .collect(),
+        );
+    }
     OrganizationDomainPolicy::new(claim, allowed_base_domains).context(
         "IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM and \
          IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS do not form a valid policy",

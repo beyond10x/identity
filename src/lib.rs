@@ -143,6 +143,18 @@ impl Config {
             digest.update((domain.len() as u64).to_be_bytes());
             digest.update(domain.as_bytes());
         }
+        let mut tenant_mappings = self
+            .organization_domain_policy
+            .tenant_by_claim_value
+            .iter()
+            .collect::<Vec<_>>();
+        tenant_mappings.sort();
+        for (claim_value, tenant_id) in tenant_mappings {
+            for field in [claim_value.as_str(), tenant_id.as_str()] {
+                digest.update((field.len() as u64).to_be_bytes());
+                digest.update(field.as_bytes());
+            }
+        }
         for client in &self.web_clients {
             for field in [client.client_id.as_str(), client.redirect_uri.as_str()] {
                 digest.update((field.len() as u64).to_be_bytes());
@@ -302,6 +314,7 @@ fn normalize_email(value: &str) -> Result<String> {
 pub struct OrganizationDomainPolicy {
     claim: Option<String>,
     allowed_base_domains: Vec<String>,
+    tenant_by_claim_value: HashMap<String, String>,
 }
 
 impl OrganizationDomainPolicy {
@@ -332,11 +345,74 @@ impl OrganizationDomainPolicy {
                 Ok(Self {
                     claim,
                     allowed_base_domains: normalized_domains.into_iter().collect(),
+                    tenant_by_claim_value: HashMap::new(),
                 })
             }
         }
     }
 
+    /// Builds an exact verified-claim-to-tenant registry. Claim values cannot overlap and tenant
+    /// identifiers are never inferred from email or request parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid claim name, an empty registry, duplicate claim values, or
+    /// malformed tenant identifiers.
+    pub fn exact_tenant_mapping(claim: &str, mappings: Vec<(String, String)>) -> Result<Self> {
+        let claim = claim.trim().to_owned();
+        if claim.is_empty() || claim.len() > 512 || claim.chars().any(char::is_whitespace) {
+            bail!("organization claim must be a bounded non-whitespace JSON claim name");
+        }
+        let mut tenant_by_claim_value = HashMap::new();
+        for (value, tenant_id) in mappings {
+            let value = value.trim().to_ascii_lowercase();
+            let tenant_id = tenant_id.trim().to_owned();
+            if value.is_empty()
+                || value.len() > 512
+                || value.chars().any(char::is_whitespace)
+                || !(1..=128).contains(&tenant_id.len())
+                || !tenant_id.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+                })
+                || tenant_by_claim_value.insert(value, tenant_id).is_some()
+            {
+                bail!("organization tenant mappings must be exact, unique, and bounded");
+            }
+        }
+        if tenant_by_claim_value.is_empty() {
+            bail!("organization tenant mapping cannot be empty");
+        }
+        Ok(Self {
+            claim: Some(claim),
+            allowed_base_domains: Vec::new(),
+            tenant_by_claim_value,
+        })
+    }
+
+    fn resolve_tenant(
+        &self,
+        claims: &HashMap<String, Value>,
+        legacy_tenant: &str,
+    ) -> Option<String> {
+        let Some(claim) = self.claim.as_deref() else {
+            return Some(legacy_tenant.to_owned());
+        };
+        let value = claims.get(claim)?.as_str()?.to_ascii_lowercase();
+        if !self.tenant_by_claim_value.is_empty() {
+            return self.tenant_by_claim_value.get(&value).cloned();
+        }
+        self.allowed_base_domains
+            .iter()
+            .any(|base| {
+                value == *base
+                    || value
+                        .strip_suffix(base)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            })
+            .then(|| legacy_tenant.to_owned())
+    }
+
+    #[cfg(test)]
     fn admits(&self, claims: &HashMap<String, Value>) -> bool {
         let Some(claim) = self.claim.as_deref() else {
             return true;
@@ -345,12 +421,13 @@ impl OrganizationDomainPolicy {
             return false;
         };
         let domain = domain.to_ascii_lowercase();
-        self.allowed_base_domains.iter().any(|base| {
-            domain == *base
-                || domain
-                    .strip_suffix(base)
-                    .is_some_and(|prefix| prefix.ends_with('.'))
-        })
+        self.tenant_by_claim_value.contains_key(&domain)
+            || self.allowed_base_domains.iter().any(|base| {
+                domain == *base
+                    || domain
+                        .strip_suffix(base)
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            })
     }
 }
 
@@ -480,6 +557,7 @@ async fn initialize_postgres(client: &tokio_postgres::Client) -> Result<()> {
                redirect_uri TEXT NOT NULL,
                code_challenge TEXT NOT NULL,
                subject TEXT NOT NULL,
+               tenant_id TEXT NOT NULL,
                email TEXT
              );
              CREATE TABLE IF NOT EXISTS sessions (
@@ -497,6 +575,7 @@ async fn initialize_postgres(client: &tokio_postgres::Client) -> Result<()> {
              );
              ALTER TABLE sessions ADD COLUMN IF NOT EXISTS issuer TEXT NOT NULL DEFAULT '';
              ALTER TABLE sessions ADD COLUMN IF NOT EXISTS configuration_generation TEXT NOT NULL DEFAULT '';
+             ALTER TABLE authorization_codes ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '';
              CREATE TABLE IF NOT EXISTS access_tokens (
                verifier_hash BYTEA PRIMARY KEY,
                issuer TEXT NOT NULL,
@@ -606,6 +685,7 @@ impl Store {
                redirect_uri TEXT NOT NULL,
                code_challenge TEXT NOT NULL,
                subject TEXT NOT NULL,
+               tenant_id TEXT NOT NULL,
                email TEXT
              );
              CREATE TABLE IF NOT EXISTS sessions (
@@ -637,6 +717,12 @@ impl Store {
                groups TEXT NOT NULL DEFAULT '',
                revoked_at INTEGER
              );",
+        )?;
+        ensure_sqlite_column(
+            &connection,
+            "authorization_codes",
+            "tenant_id",
+            "TEXT NOT NULL DEFAULT ''",
         )?;
         ensure_sqlite_column(
             &connection,
@@ -780,8 +866,9 @@ impl Store {
             Self::Sqlite(_) => {
                 self.sqlite_connection()?.execute(
                     "INSERT INTO authorization_codes (
-                       code_hash, created_at, client_id, redirect_uri, code_challenge, subject, email
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                       code_hash, created_at, client_id, redirect_uri, code_challenge, subject,
+                       tenant_id, email
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         digest,
                         authorization.created_at,
@@ -789,6 +876,7 @@ impl Store {
                         authorization.redirect_uri,
                         authorization.code_challenge,
                         authorization.subject,
+                        authorization.tenant_id,
                         authorization.email,
                     ],
                 )?;
@@ -798,8 +886,9 @@ impl Store {
                 client
                     .execute(
                         "INSERT INTO authorization_codes (
-                           code_hash, created_at, client_id, redirect_uri, code_challenge, subject, email
-                         ) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                           code_hash, created_at, client_id, redirect_uri, code_challenge, subject,
+                           tenant_id, email
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                         &[
                             &digest,
                             &authorization.created_at,
@@ -807,6 +896,7 @@ impl Store {
                             &authorization.redirect_uri,
                             &authorization.code_challenge,
                             &authorization.subject,
+                            &authorization.tenant_id,
                             &authorization.email,
                         ],
                     )
@@ -823,7 +913,8 @@ impl Store {
                 .sqlite_connection()?
                 .query_row(
                     "DELETE FROM authorization_codes WHERE code_hash = ?1
-                     RETURNING created_at, client_id, redirect_uri, code_challenge, subject, email",
+                     RETURNING created_at, client_id, redirect_uri, code_challenge, subject,
+                               tenant_id, email",
                     [digest.as_slice()],
                     |row| {
                         Ok(PendingAuthorization {
@@ -832,7 +923,8 @@ impl Store {
                             redirect_uri: row.get(2)?,
                             code_challenge: row.get(3)?,
                             subject: row.get(4)?,
-                            email: row.get(5)?,
+                            tenant_id: row.get(5)?,
+                            email: row.get(6)?,
                         })
                     },
                 )
@@ -843,7 +935,8 @@ impl Store {
                 client
                     .query_opt(
                         "DELETE FROM authorization_codes WHERE code_hash = $1
-                     RETURNING created_at, client_id, redirect_uri, code_challenge, subject, email",
+                     RETURNING created_at, client_id, redirect_uri, code_challenge, subject,
+                               tenant_id, email",
                         &[&digest],
                     )
                     .await
@@ -854,7 +947,8 @@ impl Store {
                             redirect_uri: row.get(2),
                             code_challenge: row.get(3),
                             subject: row.get(4),
-                            email: row.get(5),
+                            tenant_id: row.get(5),
+                            email: row.get(6),
                         })
                     })
                     .map_err(Into::into)
@@ -866,6 +960,7 @@ impl Store {
         &self,
         credential: &str,
         config: &Config,
+        tenant_id: &str,
         identity: &Identity,
     ) -> Result<()> {
         let now = unix_time()?;
@@ -885,7 +980,7 @@ impl Store {
                         digest.as_slice(),
                         config.issuer(),
                         config.configuration_generation(),
-                        config.tenant_id,
+                        tenant_id,
                         identity.subject,
                         identity.email,
                         now,
@@ -907,7 +1002,7 @@ impl Store {
                             &digest,
                             &config.issuer(),
                             &config.configuration_generation(),
-                            &config.tenant_id,
+                            &tenant_id,
                             &identity.subject,
                             &identity.email,
                             &now,
@@ -940,7 +1035,6 @@ impl Store {
                      WHERE verifier_hash = ?1
                        AND issuer = ?4
                        AND configuration_generation = ?5
-                       AND tenant_id = ?6
                        AND revoked_at IS NULL
                        AND idle_expires_at > ?2
                        AND absolute_expires_at > ?2
@@ -951,7 +1045,6 @@ impl Store {
                         idle_expires_at,
                         config.issuer(),
                         generation,
-                        config.tenant_id,
                     ],
                     |row| {
                         Ok(AdmittedSession {
@@ -974,7 +1067,6 @@ impl Store {
                      WHERE verifier_hash = $1
                        AND issuer = $4
                        AND configuration_generation = $5
-                       AND tenant_id = $6
                        AND revoked_at IS NULL
                        AND idle_expires_at > $2
                        AND absolute_expires_at > $2
@@ -985,7 +1077,6 @@ impl Store {
                             &idle_expires_at,
                             &config.issuer(),
                             &generation,
-                            &config.tenant_id,
                         ],
                     )
                     .await
@@ -1374,6 +1465,7 @@ struct PendingAuthorization {
     redirect_uri: String,
     code_challenge: String,
     subject: String,
+    tenant_id: String,
     email: Option<String>,
 }
 
@@ -1987,15 +2079,13 @@ async fn upstream_callback(
             &Nonce::new(login.upstream_nonce),
         )
         .map_err(|_| HttpError::denied("upstream ID token validation failed"))?;
-    if !state
+    let tenant_id = state
         .config
         .organization_domain_policy
-        .admits(&claims.additional_claims().0)
-    {
-        return Err(HttpError::denied(
-            "upstream organization is not admitted by this deployment",
-        ));
-    }
+        .resolve_tenant(&claims.additional_claims().0, &state.config.tenant_id)
+        .ok_or_else(|| {
+            HttpError::denied("upstream organization is not admitted by this deployment")
+        })?;
     if claims.email().is_some() && claims.email_verified() != Some(true) {
         return Err(HttpError::denied("upstream email address is not verified"));
     }
@@ -2014,6 +2104,7 @@ async fn upstream_callback(
                 redirect_uri: login.redirect_uri.clone(),
                 code_challenge: login.client_code_challenge,
                 subject: identity.subject,
+                tenant_id,
                 email: identity.email,
             },
         )
@@ -2061,14 +2152,19 @@ async fn exchange_token(
     };
     state
         .store
-        .put_session(&credential, &state.config, &identity)
+        .put_session(
+            &credential,
+            &state.config,
+            &authorization.tenant_id,
+            &identity,
+        )
         .await
         .map_err(HttpError::internal)?;
     Ok(confidential_json(SessionResponse {
         session: credential,
         session_type: "opaque_server_session",
         expires_in: SESSION_IDLE_SECONDS,
-        tenant_id: state.config.tenant_id.clone(),
+        tenant_id: authorization.tenant_id,
         subject: identity.subject,
         email: identity.email,
     }))
@@ -2476,6 +2572,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn verified_organization_claims_resolve_two_exact_tenants_without_fallback() {
+        let policy = OrganizationDomainPolicy::exact_tenant_mapping(
+            "organization_id",
+            vec![
+                ("org-a".to_owned(), "tenant:a".to_owned()),
+                ("org-b".to_owned(), "tenant:b".to_owned()),
+            ],
+        )
+        .unwrap();
+        for (organization, tenant) in [("org-a", "tenant:a"), ("ORG-B", "tenant:b")] {
+            let claims = HashMap::from([(
+                "organization_id".to_owned(),
+                Value::String(organization.to_owned()),
+            )]);
+            assert_eq!(
+                policy.resolve_tenant(&claims, "tenant:legacy").as_deref(),
+                Some(tenant)
+            );
+        }
+        let unknown = HashMap::from([(
+            "organization_id".to_owned(),
+            Value::String("org-c".to_owned()),
+        )]);
+        assert_eq!(policy.resolve_tenant(&unknown, "tenant:legacy"), None);
+    }
+
     #[tokio::test]
     async fn authorization_code_is_single_use_and_stored_as_a_hash() {
         let store = Store::in_memory().unwrap();
@@ -2485,6 +2608,7 @@ mod tests {
             redirect_uri: "http://127.0.0.1:43123/callback".to_owned(),
             code_challenge: pkce_challenge(&"b".repeat(64)),
             subject: "google-subject".to_owned(),
+            tenant_id: "tenant-dev".to_owned(),
             email: Some("developer@example.test".to_owned()),
         };
         store.put_code("secret-code", &authorization).await.unwrap();
@@ -2510,7 +2634,7 @@ mod tests {
             email: Some("developer@example.test".to_owned()),
         };
         store
-            .put_session("dl_session_v1_secret", &config(), &identity)
+            .put_session("dl_session_v1_secret", &config(), "tenant-dev", &identity)
             .await
             .unwrap();
         let raw_count: i64 = store
@@ -2762,7 +2886,7 @@ mod tests {
         };
         let credential = format!("dl_session_v1_{}", "a".repeat(43));
         store
-            .put_session(&credential, &config, &identity)
+            .put_session(&credential, &config, "tenant-dev", &identity)
             .await
             .unwrap();
 
@@ -2795,7 +2919,7 @@ mod tests {
         };
         let credential = format!("dl_session_v1_{}", "c".repeat(43));
         store
-            .put_session(&credential, &config, &identity)
+            .put_session(&credential, &config, "tenant-dev", &identity)
             .await
             .unwrap();
 

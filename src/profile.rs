@@ -1720,7 +1720,7 @@ mod tests {
         };
         let credential = format!("dl_session_v1_{}", "a".repeat(43));
         store
-            .put_session(&credential, &config, &identity)
+            .put_session(&credential, &config, TENANT, &identity)
             .await
             .unwrap();
 
