@@ -509,8 +509,10 @@ async fn initialize_postgres(client: &tokio_postgres::Client) -> Result<()> {
                scope TEXT NOT NULL,
                principal_kind TEXT NOT NULL,
                tenant_id TEXT NOT NULL,
+               groups TEXT NOT NULL DEFAULT '',
                revoked_at BIGINT
-             );",
+             );
+             ALTER TABLE access_tokens ADD COLUMN IF NOT EXISTS groups TEXT NOT NULL DEFAULT '';",
         )
         .await
         .context("initialize identity PostgreSQL schema")?;
@@ -631,6 +633,7 @@ impl Store {
                scope TEXT NOT NULL,
                principal_kind TEXT NOT NULL,
                tenant_id TEXT NOT NULL,
+               groups TEXT NOT NULL DEFAULT '',
                revoked_at INTEGER
              );",
         )?;
@@ -644,6 +647,12 @@ impl Store {
             &connection,
             "sessions",
             "configuration_generation",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        ensure_sqlite_column(
+            &connection,
+            "access_tokens",
+            "groups",
             "TEXT NOT NULL DEFAULT ''",
         )?;
         connection.execute_batch(directory::SQLITE_SCHEMA)?;
@@ -997,13 +1006,14 @@ impl Store {
         self.prepare_insert(authority.iat, "access_tokens", MAX_ACCESS_TOKENS)
             .await?;
         let digest = hash(credential);
+        let groups = authority.groups.join(" ");
         match self {
             Self::Sqlite(_) => {
                 self.sqlite_connection()?.execute(
                     "INSERT INTO access_tokens (
                        verifier_hash, issuer, subject, audience, issued_at, not_before, expires_at,
-                       token_id, actor_subject, scope, principal_kind, tenant_id, revoked_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL)",
+                       token_id, actor_subject, scope, principal_kind, tenant_id, groups, revoked_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
                     params![
                         digest.as_slice(),
                         authority.iss,
@@ -1017,6 +1027,7 @@ impl Store {
                         authority.scope,
                         authority.dl_principal_kind,
                         authority.dl_tenant,
+                        groups,
                     ],
                 )?;
             }
@@ -1027,8 +1038,8 @@ impl Store {
                         "INSERT INTO access_tokens (
                            verifier_hash, issuer, subject, audience, issued_at, not_before,
                            expires_at, token_id, actor_subject, scope, principal_kind, tenant_id,
-                           revoked_at
-                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL)",
+                           groups, revoked_at
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL)",
                         &[
                             &digest,
                             &authority.iss,
@@ -1042,6 +1053,7 @@ impl Store {
                             &authority.scope,
                             &authority.dl_principal_kind,
                             &authority.dl_tenant,
+                            &groups,
                         ],
                     )
                     .await?;
@@ -1062,7 +1074,7 @@ impl Store {
                 .sqlite_connection()?
                 .query_row(
                     "SELECT issuer, subject, audience, issued_at, not_before, expires_at, token_id,
-                            actor_subject, scope, principal_kind, tenant_id
+                            actor_subject, scope, principal_kind, tenant_id, groups
                      FROM access_tokens
                      WHERE verifier_hash = ?1 AND audience = ?2 AND revoked_at IS NULL
                        AND not_before <= ?3 AND expires_at > ?3",
@@ -1075,7 +1087,7 @@ impl Store {
                 let client = store.client().await?;
                 client.query_opt(
                     "SELECT issuer, subject, audience, issued_at, not_before, expires_at, token_id,
-                            actor_subject, scope, principal_kind, tenant_id
+                            actor_subject, scope, principal_kind, tenant_id, groups
                      FROM access_tokens
                      WHERE verifier_hash = $1 AND audience = $2 AND revoked_at IS NULL
                        AND not_before <= $3 AND expires_at > $3",
@@ -1095,6 +1107,7 @@ impl Store {
                         scope: row.get(8),
                         dl_principal_kind: row.get(9),
                         dl_tenant: row.get(10),
+                        groups: groups_from_storage(&row.get::<_, String>(11)),
                     })
                 })
                 .map_err(Into::into)
@@ -1318,7 +1331,15 @@ fn access_authority_from_sqlite_row(row: &rusqlite::Row<'_>) -> rusqlite::Result
         scope: row.get(8)?,
         dl_principal_kind: row.get(9)?,
         dl_tenant: row.get(10)?,
+        groups: groups_from_storage(&row.get::<_, String>(11)?),
     })
+}
+
+fn groups_from_storage(value: &str) -> Vec<String> {
+    value
+        .split_ascii_whitespace()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// One finite row cap on a durable, non-expiring table. Credential tables keep their own
@@ -1468,6 +1489,7 @@ struct AccessAuthority {
     scope: String,
     dl_principal_kind: String,
     dl_tenant: String,
+    groups: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1719,7 +1741,6 @@ async fn issue_access_token(
     if request.audience != CONNECTORS_AUDIENCE {
         return Err(HttpError::denied("the requested audience is not admitted"));
     }
-    let scope = bootstrap_connector_scope(&request.scope)?;
     let credential = bearer(&headers, valid_session_credential)
         .ok_or_else(|| HttpError::denied("a valid Identity session is required"))?;
     let admitted = state
@@ -1728,6 +1749,11 @@ async fn issue_access_token(
         .await
         .map_err(HttpError::internal)?
         .ok_or_else(|| HttpError::denied("the Identity session is expired or revoked"))?;
+    let groups = state
+        .config
+        .static_group_memberships
+        .groups_for(&admitted.tenant_id, admitted.email.as_deref());
+    let scope = admitted_connector_scope(&request.scope, &groups)?;
     let now = unix_time().map_err(HttpError::internal)?;
     let credential = format!(
         "dl_access_v1_{}",
@@ -1755,8 +1781,8 @@ async fn issue_access_token(
         scope: scope.clone(),
         dl_principal_kind: "human".to_owned(),
         dl_tenant: admitted.tenant_id,
+        groups,
     };
-    let _ = admitted.email;
     let _ = admitted.expires_at;
     state
         .store
@@ -2165,6 +2191,7 @@ fn canonical_connector_scope(value: &str) -> Result<String, HttpError> {
     Ok(scopes.into_iter().collect::<Vec<_>>().join(" "))
 }
 
+#[cfg(test)]
 fn bootstrap_connector_scope(value: &str) -> Result<String, HttpError> {
     let scope = canonical_connector_scope(value)?;
     if scope != "connectors.catalog.read" {
@@ -2173,6 +2200,16 @@ fn bootstrap_connector_scope(value: &str) -> Result<String, HttpError> {
         ));
     }
     Ok(scope)
+}
+
+fn admitted_connector_scope(value: &str, groups: &[String]) -> Result<String, HttpError> {
+    let scope = canonical_connector_scope(value)?;
+    if scope == "connectors.catalog.read" || groups.iter().any(|group| group == "operator") {
+        return Ok(scope);
+    }
+    Err(HttpError::denied(
+        "the authenticated principal is not admitted for effect-bearing Connector scopes",
+    ))
 }
 
 fn pkce_challenge(verifier: &str) -> String {
@@ -2778,6 +2815,7 @@ mod tests {
             scope: "connectors.catalog.read".to_owned(),
             dl_principal_kind: "human".to_owned(),
             dl_tenant: config.tenant_id.clone(),
+            groups: Vec::new(),
         };
         let access = format!("dl_access_v1_{}", "d".repeat(43));
         store.put_access_token(&access, &authority).await.unwrap();
@@ -2834,6 +2872,7 @@ mod tests {
             scope: "connectors.catalog.read connectors.invoke".to_owned(),
             dl_principal_kind: "human".to_owned(),
             dl_tenant: "tenant-dev".to_owned(),
+            groups: vec!["operator".to_owned()],
         };
         let credential = format!("dl_access_v1_{}", "a".repeat(43));
         store
@@ -2888,6 +2927,21 @@ mod tests {
             "connectors.catalog.read"
         );
         assert!(bootstrap_connector_scope("connectors.invoke").is_err());
+        assert_eq!(
+            admitted_connector_scope(
+                "connectors.catalog.read connectors.events.read connectors.invoke",
+                &["operator".to_owned()],
+            )
+            .unwrap(),
+            "connectors.catalog.read connectors.events.read connectors.invoke"
+        );
+        assert!(
+            admitted_connector_scope(
+                "connectors.catalog.read connectors.invoke",
+                &["member".to_owned()],
+            )
+            .is_err()
+        );
     }
 
     #[test]

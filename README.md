@@ -42,10 +42,11 @@ pinning, not a credential or an access grant.
 
 Before a hosted Connector request, the native client presents its login-continuity session only to
 Identity at `POST /v1/access-token`. Identity returns a five-minute opaque access token with the
-exact `urn:daemonloom:connectors` audience. The current bootstrap mints only
-`connectors.catalog.read`; it refuses invocation and management scopes until receiver-owned Grant
-and management authorization exist. Connectors
-then resolves that access token through `GET /v1/access-authority`; the result is the complete
+exact `urn:daemonloom:connectors` audience. The bootstrap mints `connectors.catalog.read` for every
+authenticated principal. Principals mapped to the deployment's `operator` group may request the
+exact larger Connector scope set they need; the resolved group facts travel in the short-lived
+authority envelope so Connectors can apply its independent receiver-owned management policy.
+Connectors then resolves that access token through `GET /v1/access-authority`; the result is the complete
 validated foundation envelope (`iss`, `sub`, `aud`, time window, `jti`, immediate actor, scopes,
 principal kind, and tenant). Login sessions and upstream provider credentials never reach
 Connectors. Connector scopes remain only a coarse gate: Connectors must still perform its own
