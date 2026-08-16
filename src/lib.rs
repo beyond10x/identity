@@ -14,7 +14,7 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, Form, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use openidconnect::core::{
@@ -31,6 +31,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
 use zeroize::Zeroizing;
+
+mod directory;
+mod profile;
+mod screening;
 
 const LOGIN_LIFETIME_SECONDS: i64 = 10 * 60;
 const CODE_LIFETIME_SECONDS: i64 = 60;
@@ -144,12 +148,16 @@ impl Config {
                 digest.update(field.as_bytes());
             }
         }
-        let mut generation = String::with_capacity(64);
-        for byte in digest.finalize() {
-            write!(generation, "{byte:02x}").expect("writing to a String cannot fail");
-        }
-        generation
+        hex_digest(&digest.finalize()[..])
     }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut rendered = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(rendered, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    rendered
 }
 
 /// One exact browser authorization client. Browser clients remain public clients and must use
@@ -505,7 +513,18 @@ async fn initialize_postgres(client: &tokio_postgres::Client) -> Result<()> {
              );",
         )
         .await
-        .context("initialize identity PostgreSQL schema")
+        .context("initialize identity PostgreSQL schema")?;
+    // Additive-only directory and profile tables. Every statement creates a table or index that
+    // did not exist before; no existing table, column, index, or row is altered, rewritten, or
+    // dropped, so applying this to a live database takes no lock on a credential table and an
+    // older binary keeps running unchanged against it.
+    for schema in [directory::POSTGRES_SCHEMA, profile::POSTGRES_SCHEMA] {
+        client
+            .batch_execute(schema)
+            .await
+            .context("extend identity PostgreSQL schema")?;
+    }
+    Ok(())
 }
 
 impl Store {
@@ -627,6 +646,8 @@ impl Store {
             "configuration_generation",
             "TEXT NOT NULL DEFAULT ''",
         )?;
+        connection.execute_batch(directory::SQLITE_SCHEMA)?;
+        connection.execute_batch(profile::SQLITE_SCHEMA)?;
         Ok(Self::Sqlite(Arc::new(Mutex::new(connection))))
     }
 
@@ -1220,6 +1241,53 @@ impl Store {
         Ok(())
     }
 
+    /// Refuses a write that would exceed a finite row cap and returns the process-wide admission
+    /// guard, so the caller's insert is serialized against a concurrent check exactly as the
+    /// credential tables are.
+    async fn enforce_row_caps(
+        &self,
+        caps: &[RowCap<'_>],
+    ) -> Result<Option<tokio::sync::MutexGuard<'_, ()>>, HttpError> {
+        let admission = self.capacity_admission().await;
+        for cap in caps {
+            let count = self
+                .count_rows(cap.sqlite_count, cap.postgres_count, cap.arguments)
+                .await
+                .map_err(HttpError::internal)?;
+            if count >= cap.maximum {
+                return Err(HttpError::unprocessable(format!(
+                    "identity {} capacity of {} records is exhausted",
+                    cap.label, cap.maximum
+                )));
+            }
+        }
+        Ok(admission)
+    }
+
+    async fn count_rows(
+        &self,
+        sqlite_count: &str,
+        postgres_count: &str,
+        arguments: &[&str],
+    ) -> Result<i64> {
+        match self {
+            Self::Sqlite(_) => self
+                .sqlite_connection()?
+                .query_row(sqlite_count, rusqlite::params_from_iter(arguments), |row| {
+                    row.get(0)
+                })
+                .map_err(Into::into),
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                let parameters = arguments
+                    .iter()
+                    .map(|value| value as &(dyn tokio_postgres::types::ToSql + Sync))
+                    .collect::<Vec<_>>();
+                Ok(client.query_one(postgres_count, &parameters).await?.get(0))
+            }
+        }
+    }
+
     async fn capacity_admission(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
         match self {
             Self::Sqlite(_) => None,
@@ -1251,6 +1319,17 @@ fn access_authority_from_sqlite_row(row: &rusqlite::Row<'_>) -> rusqlite::Result
         dl_principal_kind: row.get(9)?,
         dl_tenant: row.get(10)?,
     })
+}
+
+/// One finite row cap on a durable, non-expiring table. Credential tables keep their own
+/// expiry-plus-cap path; a directory or profile row is not a credential and never expires, so it
+/// is bounded rather than collected.
+struct RowCap<'a> {
+    sqlite_count: &'a str,
+    postgres_count: &'a str,
+    arguments: &'a [&'a str],
+    maximum: i64,
+    label: &'a str,
 }
 
 #[derive(Debug)]
@@ -1421,6 +1500,32 @@ impl HttpError {
         }
     }
 
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "access_denied",
+            message: message.into(),
+        }
+    }
+
+    fn missing(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: message.into(),
+        }
+    }
+
+    /// A syntactically valid request refused by a durable rule such as a closed epistemic state,
+    /// a screened value, or an exhausted row cap.
+    fn unprocessable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "invalid_request",
+            message: message.into(),
+        }
+    }
+
     fn internal(error: impl std::fmt::Display) -> Self {
         tracing::error!(error = %error, "identity request failed");
         Self {
@@ -1474,8 +1579,103 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/access-token", post(issue_access_token))
         .route("/v1/access-authority", get(verify_access_token))
         .route("/v1/logout", post(logout))
+        .merge(directory_router())
+        .merge(profile_router())
         .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
         .with_state(state)
+}
+
+/// Organization membership and group routes. Reads require an exact directory audience and an
+/// Identity session; writes additionally require the deployment-configured directory
+/// administration static group.
+fn directory_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/v1/directory/membership",
+            get(directory::read_own_membership),
+        )
+        .route(
+            "/v1/directory/members/{subject}",
+            put(directory::upsert_member),
+        )
+        .route(
+            "/v1/directory/groups/{group_key}",
+            get(directory::read_group_view).put(directory::upsert_group),
+        )
+        .route(
+            "/v1/directory/groups/{group_key}/members/{subject}",
+            put(directory::add_group_member).delete(directory::remove_group_member),
+        )
+}
+
+/// Personal collaboration profile routes. Every one of them is self-scoped: the subject of the
+/// presented session is the subject of the profile, and no route reaches another principal.
+fn profile_router() -> Router<AppState> {
+    Router::new()
+        .route("/v1/profile", get(profile::read_profile))
+        .route("/v1/profile/consent", put(profile::put_consent))
+        .route("/v1/profile/snapshot", get(profile::read_snapshot))
+        .route("/v1/profile/statements", post(profile::create_statement))
+        .route(
+            "/v1/profile/statements/{statement_id}",
+            delete(profile::forget_statement),
+        )
+        .route(
+            "/v1/profile/statements/{statement_id}/confirm",
+            post(profile::confirm_statement),
+        )
+        .route(
+            "/v1/profile/statements/{statement_id}/revoke",
+            post(profile::revoke_statement),
+        )
+        .route(
+            "/v1/profile/statements/{statement_id}/correct",
+            post(profile::correct_statement),
+        )
+}
+
+/// Resolves the presented Identity session for one exact internal audience.
+///
+/// This is the same admission the status authority endpoint performs: an allowlisted in-cluster
+/// caller presents the person's own session together with the exact audience it was sent to. It
+/// never turns a session into an independently reusable token and never reaches another subject.
+async fn admitted_session_for_audience(
+    state: &AppState,
+    headers: &HeaderMap,
+    audience: &str,
+) -> Result<AdmittedSession, HttpError> {
+    admitted_session_for_audiences(state, headers, &[audience]).await
+}
+
+/// The same admission for a route reachable from more than one exact audience. The route's
+/// audience set is the boundary: a caller presenting a different admitted audience is refused
+/// here rather than inside the handler.
+async fn admitted_session_for_audiences(
+    state: &AppState,
+    headers: &HeaderMap,
+    audiences: &[&str],
+) -> Result<AdmittedSession, HttpError> {
+    if !audiences
+        .iter()
+        .any(|audience| audience_matches(headers, audience))
+    {
+        return Err(HttpError::denied("an exact admitted audience is required"));
+    }
+    let credential = bearer(headers, valid_session_credential)
+        .ok_or_else(|| HttpError::denied("a valid Identity session is required"))?;
+    state
+        .store
+        .resolve_session(credential, &state.config)
+        .await
+        .map_err(HttpError::internal)?
+        .ok_or_else(|| HttpError::denied("the Identity session is expired or revoked"))
+}
+
+fn audience_matches(headers: &HeaderMap, audience: &str) -> bool {
+    headers
+        .get("x-daemonloom-audience")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == audience)
 }
 
 async fn liveness() -> &'static str {
@@ -1576,19 +1776,7 @@ async fn session_authority(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    headers
-        .get("x-daemonloom-audience")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| *value == STATUS_AUDIENCE)
-        .ok_or_else(|| HttpError::denied("an exact admitted audience is required"))?;
-    let credential = bearer(&headers, valid_session_credential)
-        .ok_or_else(|| HttpError::denied("a valid Identity session is required"))?;
-    let admitted = state
-        .store
-        .resolve_session(credential, &state.config)
-        .await
-        .map_err(HttpError::internal)?
-        .ok_or_else(|| HttpError::denied("the Identity session is expired or revoked"))?;
+    let admitted = admitted_session_for_audience(&state, &headers, STATUS_AUDIENCE).await?;
     let groups = state
         .config
         .static_group_memberships
@@ -2291,6 +2479,233 @@ mod tests {
         assert_eq!(raw_count, 0);
     }
 
+    /// The directory and profile schema must be safe to apply to the database a deployed Identity
+    /// is already using: no existing table is altered, no row is rewritten, and a pre-existing
+    /// credential still resolves afterwards.
+    #[tokio::test]
+    async fn the_new_schema_applies_additively_to_a_live_database() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                   verifier_hash BLOB PRIMARY KEY,
+                   issuer TEXT NOT NULL,
+                   configuration_generation TEXT NOT NULL,
+                   tenant_id TEXT NOT NULL,
+                   subject TEXT NOT NULL,
+                   email TEXT,
+                   created_at INTEGER NOT NULL,
+                   last_used_at INTEGER NOT NULL,
+                   idle_expires_at INTEGER NOT NULL,
+                   absolute_expires_at INTEGER NOT NULL,
+                   revoked_at INTEGER
+                 );",
+            )
+            .unwrap();
+        let config = config();
+        let now = unix_time().unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions (
+                   verifier_hash, issuer, configuration_generation, tenant_id, subject, email,
+                   created_at, last_used_at, idle_expires_at, absolute_expires_at, revoked_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?6, ?7, ?8, NULL)",
+                params![
+                    hash("dl_session_v1_already_issued"),
+                    config.issuer(),
+                    config.configuration_generation(),
+                    config.tenant_id,
+                    "pre-existing-subject",
+                    now,
+                    now + 3_600,
+                    now + 7_200,
+                ],
+            )
+            .unwrap();
+
+        let store = Store::from_sqlite_connection(connection).unwrap();
+
+        let admitted = store
+            .resolve_session("dl_session_v1_already_issued", &config)
+            .await
+            .unwrap()
+            .expect("a credential issued before the migration must keep working");
+        assert_eq!(admitted.subject, "pre-existing-subject");
+
+        for table in [
+            "directory_principals",
+            "directory_groups",
+            "directory_group_members",
+            "profile_consents",
+            "profile_excluded_sources",
+            "profile_statements",
+        ] {
+            let rows: i64 = store
+                .sqlite_connection()
+                .unwrap()
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "{table} must be created empty");
+        }
+
+        // Re-applying the schema, as a restart or a reconnect does, changes nothing.
+        for schema in [directory::SQLITE_SCHEMA, profile::SQLITE_SCHEMA] {
+            store
+                .sqlite_connection()
+                .unwrap()
+                .execute_batch(schema)
+                .unwrap();
+        }
+        assert!(
+            store
+                .resolve_session("dl_session_v1_already_issued", &config)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// Exercises the clustered arm of every directory and profile statement against a real
+    /// `PostgreSQL` server, because the two arms are separate SQL strings and only one of them is
+    /// covered by the in-memory tests. Set `IDENTITY_TEST_POSTGRES_URL` to run it; without a
+    /// server the test reports that it was skipped rather than pretending to have proved anything.
+    #[tokio::test]
+    async fn the_postgres_arm_applies_the_same_schema_and_queries() {
+        let Ok(url) = std::env::var("IDENTITY_TEST_POSTGRES_URL") else {
+            eprintln!("skipped: IDENTITY_TEST_POSTGRES_URL is not set");
+            return;
+        };
+        let store = Store::connect_postgres(&url).await.unwrap();
+        let tenant = format!("tenant-{}", random_token(8).unwrap().to_lowercase());
+        let subject = format!("subject-{}", random_token(8).unwrap());
+        exercise_postgres_directory(&store, &tenant, &subject).await;
+        exercise_postgres_profile(&store, &tenant, &subject).await;
+    }
+
+    async fn exercise_postgres_directory(store: &Store, tenant: &str, subject: &str) {
+        directory::write_member(
+            store,
+            tenant,
+            &directory::MemberRecord {
+                subject: subject.to_owned(),
+                principal_kind: "agent".to_owned(),
+                email: None,
+                display_name: "Planner".to_owned(),
+                status: "active".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        directory::write_group(
+            store,
+            tenant,
+            &directory::GroupRecord {
+                group_key: "project-atlas".to_owned(),
+                display_name: "Project Atlas".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        directory::write_group_member(store, tenant, "project-atlas", subject)
+            .await
+            .unwrap();
+        assert_eq!(
+            directory::resolve_subject_groups(store, tenant, subject)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            directory::resolve_group_members(store, tenant, "project-atlas")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            directory::erase_group_member(store, tenant, "project-atlas", subject)
+                .await
+                .unwrap()
+        );
+    }
+
+    async fn exercise_postgres_profile(store: &Store, tenant: &str, subject: &str) {
+        profile::write_consent(store, tenant, subject, true)
+            .await
+            .unwrap();
+        let mut exclusions = BTreeSet::new();
+        exclusions.insert("datasource:slack-incidents".to_owned());
+        profile::replace_exclusions(store, tenant, subject, &exclusions)
+            .await
+            .unwrap();
+        assert_eq!(
+            profile::read_exclusions(store, tenant, subject)
+                .await
+                .unwrap(),
+            exclusions
+        );
+        let now = unix_time().unwrap();
+        let mut record = profile::StatementRecord {
+            statement_id: format!("dl_profile_stmt_v1_{}", random_token(16).unwrap()),
+            kind: "preference".to_owned(),
+            horizon: None,
+            content: "prefers written briefs".to_owned(),
+            epistemic_state: "inferred".to_owned(),
+            source_kind: "conversation".to_owned(),
+            source_reference: "conversation:thread-1".to_owned(),
+            observed_at: now,
+            created_at: now,
+            updated_at: now,
+            confirmed_at: None,
+            resolved_at: None,
+            superseded_by: None,
+        };
+        profile::write_statement(store, tenant, subject, &record)
+            .await
+            .unwrap();
+        assert_eq!(
+            profile::read_statements(store, tenant, subject)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        record.epistemic_state = "revoked".to_owned();
+        record.resolved_at = Some(now);
+        assert!(
+            profile::write_statement_state(store, tenant, subject, &record)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            profile::read_statement(store, tenant, subject, &record.statement_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .epistemic_state,
+            "revoked"
+        );
+        assert!(
+            profile::erase_statement(store, tenant, subject, &record.statement_id)
+                .await
+                .unwrap()
+        );
+        store
+            .enforce_row_caps(&[RowCap {
+                sqlite_count: "SELECT count(*) FROM profile_statements WHERE tenant_id = ?1",
+                postgres_count:
+                    "SELECT count(*)::BIGINT FROM profile_statements WHERE tenant_id = $1",
+                arguments: &[tenant],
+                maximum: 1,
+                label: "profile statements",
+            }])
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn session_resolution_is_bearer_bound_and_refreshes_only_live_sessions() {
         let store = Store::in_memory().unwrap();
@@ -2473,6 +2888,40 @@ mod tests {
             "connectors.catalog.read"
         );
         assert!(bootstrap_connector_scope("connectors.invoke").is_err());
+    }
+
+    #[test]
+    fn internal_audiences_are_exact_and_disjoint() {
+        let audiences = [
+            CONNECTORS_AUDIENCE,
+            STATUS_AUDIENCE,
+            directory::DIRECTORY_AUDIENCE,
+            profile::PROFILE_AUDIENCE,
+            profile::PROFILE_PROJECTION_AUDIENCE,
+        ];
+        assert_eq!(
+            audiences.iter().collect::<BTreeSet<_>>().len(),
+            audiences.len(),
+            "every internal audience must be distinct"
+        );
+
+        let mut headers = HeaderMap::new();
+        assert!(!audience_matches(&headers, directory::DIRECTORY_AUDIENCE));
+        headers.insert(
+            "x-daemonloom-audience",
+            directory::DIRECTORY_AUDIENCE.parse().unwrap(),
+        );
+        assert!(audience_matches(&headers, directory::DIRECTORY_AUDIENCE));
+        for wrong in [
+            STATUS_AUDIENCE,
+            profile::PROFILE_AUDIENCE,
+            "urn:daemonloom:directory ",
+        ] {
+            assert!(
+                !audience_matches(&headers, wrong),
+                "a directory audience must not satisfy {wrong}"
+            );
+        }
     }
 
     #[test]

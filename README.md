@@ -98,6 +98,97 @@ An internal application may resolve the current Identity session with `GET
 subject, email, tenant, expiry, and current static groups. This endpoint is intended for an
 allowlisted in-cluster caller; it does not turn groups into independently reusable access tokens.
 
+## Organization directory and groups
+
+Identity owns principals, so it also owns the organization directory that names them. A
+consuming product resolves a person or a set of people here instead of keeping its own copy.
+
+A **membership** records that a principal belongs to this deployment's tenant, its kind
+(`human`, `agent`, or `service`), and whether it is `active` or `suspended`. A **group** names a set
+of members inside the same tenant.
+
+- **Groups are flat.** A group holds principals and never another group, so resolution is one
+  bounded indexed query with no recursion and no transitive closure. Hierarchy — teams inside
+  teams, reporting lines, progression — belongs to the collaboration product's workforce view.
+- **Membership is direct.** Belonging to one group never implies belonging to another.
+- **A directory group carries no authority.** The static group assignments above remain the only
+  group vocabulary that reaches an authority response. Adding a principal to a directory group
+  grants nothing, mints no token, and changes no scope.
+- **An agent identity is an ordinary member.** Mixed human and agent participation is the normal
+  case, and a group that could not hold an agent would force a second grouping model downstream.
+  An agent membership is still not a login, and only a `human` principal may carry an email
+  address, which is the join key of the static authority table.
+- Suspending a membership removes the principal from every group resolution in one operation;
+  the rows are preserved, so reactivation restores the memberships.
+
+Every route requires an Identity session and the exact `x-daemonloom-audience:
+urn:daemonloom:directory` header. Writes additionally require the deployment-configured static
+group `identity-directory-admin`, so directory administration is deployment configuration and can
+never be granted by a directory group.
+
+```text
+GET    /v1/directory/membership                              own membership and groups
+GET    /v1/directory/groups/{group_key}                      group and its active members
+PUT    /v1/directory/groups/{group_key}                      admin: create or rename a group
+PUT    /v1/directory/members/{subject}                       admin: enroll or update a membership
+PUT    /v1/directory/groups/{group_key}/members/{subject}    admin: add a member
+DELETE /v1/directory/groups/{group_key}/members/{subject}    admin: remove a member
+```
+
+Bounds: 100 000 memberships and 10 000 groups per tenant, 512 members per group, 512 groups per
+subject. Listings are capped rather than paginated.
+
+## Personal collaboration profile
+
+Identity owns the durable profile lifecycle. A worker never touches the store; it receives an
+immutable snapshot value identified by a digest over its own content. Every route is self-scoped —
+the subject of the presented session is the subject of the profile — and no route in this service
+reads or writes another principal's profile.
+
+There are two exact audiences. `urn:daemonloom:profile` is the person's own control surface.
+`urn:daemonloom:profile-projection` is the learning consumer's, and it reaches only the projection
+and the learning write: the durable store, the withheld statements, and the lifecycle controls are
+not addressable under it. The person may see exactly what a consumer is given; a consumer may see
+nothing else.
+
+A statement has a kind (`goal_horizon` with a `session`, `short_term`, or `long_term` horizon,
+`preference`, `working_pattern`, or `friction`), an epistemic state, and the source evidence it
+came from as a closed `kind:id` reference.
+
+- **An inference never silently becomes a confirmation.** The learning write path admits only
+  `observed` and `inferred`. The only transition into `confirmed` is an explicit act by the person
+  on their own profile.
+- **The person can inspect, correct, forget, and revoke.** Inspection works regardless of consent.
+  Revoking withdraws a statement from every projection while keeping the record of the withdrawal;
+  forgetting deletes the row and its evidence. Correcting writes a new confirmed statement and
+  marks the previous one revoked and superseded.
+- **Profile-learning consent is its own consent.** It is not a Connector scope, a datasource grant,
+  or an endpoint authority. Granting it mints nothing; revoking it empties the projection without
+  touching any other authority and without destroying data.
+- **Secret material and excluded sources never enter a projection.** Statement content and source
+  references are screened for credential markers, vendor prefixes, JSON Web Token shape, URL user
+  information, and long mixed-class opaque tokens. The screen runs when a statement is written and
+  again when a snapshot is built, so a row that reached the database by another route still cannot
+  reach a model.
+
+```text
+person only    GET    /v1/profile                          durable view, with withheld reasons
+person only    PUT    /v1/profile/consent                  profile.learning and excluded sources
+person only    POST   /v1/profile/statements/{id}/confirm  the person confirms
+person only    POST   /v1/profile/statements/{id}/revoke   the person revokes or rejects
+person only    POST   /v1/profile/statements/{id}/correct  corrects, superseding the previous one
+person only    DELETE /v1/profile/statements/{id}          the person forgets
+also consumer  GET    /v1/profile/snapshot                 immutable model-visible projection
+also consumer  POST   /v1/profile/statements               learn an observed or inferred statement
+```
+
+Bounds: 512 statements per subject, 200 000 per tenant, 512 characters of statement content, 64
+excluded sources.
+
+Directory and profile tables are additive. Every statement is `CREATE TABLE`/`CREATE INDEX IF NOT
+EXISTS`; no existing table, column, index, or row is altered, rewritten, or dropped, so the schema
+is safe to apply to a running deployment and an older binary keeps working against it unchanged.
+
 The organization policy is optional, but the claim and allowlist must be configured together. It
 reads only the cryptographically verified upstream ID token. Each configured base domain admits
 the exact domain and label-bound subdomains; `evilexample.com` does not match `example.com`. With
@@ -145,6 +236,16 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 scripts/check-audit.sh
 ../cloud/deploy/tests/static.sh
+```
+
+The directory and profile stores keep a separate SQL statement per backend, and the in-memory tests
+cover only the `SQLite` one. `the_postgres_arm_applies_the_same_schema_and_queries` exercises the
+clustered arm against a real server and reports that it was skipped when
+`IDENTITY_TEST_POSTGRES_URL` is unset:
+
+```bash
+IDENTITY_TEST_POSTGRES_URL='postgresql://user:password@host:5432/identity?sslmode=disable' \
+  cargo test --locked the_postgres_arm
 ```
 
 The audit check contains one narrowly justified transitive exception: `openidconnect 4.0.1`
