@@ -50,13 +50,15 @@ const POSTGRES_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECTORS_AUDIENCE: &str = "urn:daemonloom:connectors";
 const STATUS_AUDIENCE: &str = "urn:daemonloom:status";
 const ZWIRN_AUDIENCE: &str = "urn:daemonloom:zwirn";
-const CONNECTORS_SCOPES: [&str; 9] = [
+const CONNECTORS_SCOPES: [&str; 11] = [
     "connectors.audit.read",
     "connectors.catalog.read",
     "connectors.channels.manage",
     "connectors.connections.manage",
+    "connectors.connections.self",
     "connectors.deliveries.manage",
     "connectors.events.read",
+    "connectors.events.self",
     "connectors.grants.manage",
     "connectors.integrations.manage",
     "connectors.invoke",
@@ -589,10 +591,12 @@ async fn initialize_postgres(client: &tokio_postgres::Client) -> Result<()> {
                scope TEXT NOT NULL,
                principal_kind TEXT NOT NULL,
                tenant_id TEXT NOT NULL,
+               email TEXT,
                groups TEXT NOT NULL DEFAULT '',
                revoked_at BIGINT
              );
-             ALTER TABLE access_tokens ADD COLUMN IF NOT EXISTS groups TEXT NOT NULL DEFAULT '';",
+             ALTER TABLE access_tokens ADD COLUMN IF NOT EXISTS groups TEXT NOT NULL DEFAULT '';
+             ALTER TABLE access_tokens ADD COLUMN IF NOT EXISTS email TEXT;",
         )
         .await
         .context("initialize identity PostgreSQL schema")?;
@@ -714,6 +718,7 @@ impl Store {
                scope TEXT NOT NULL,
                principal_kind TEXT NOT NULL,
                tenant_id TEXT NOT NULL,
+               email TEXT,
                groups TEXT NOT NULL DEFAULT '',
                revoked_at INTEGER
              );",
@@ -742,6 +747,7 @@ impl Store {
             "groups",
             "TEXT NOT NULL DEFAULT ''",
         )?;
+        ensure_sqlite_column(&connection, "access_tokens", "email", "TEXT")?;
         connection.execute_batch(directory::SQLITE_SCHEMA)?;
         connection.execute_batch(profile::SQLITE_SCHEMA)?;
         Ok(Self::Sqlite(Arc::new(Mutex::new(connection))))
@@ -1104,8 +1110,9 @@ impl Store {
                 self.sqlite_connection()?.execute(
                     "INSERT INTO access_tokens (
                        verifier_hash, issuer, subject, audience, issued_at, not_before, expires_at,
-                       token_id, actor_subject, scope, principal_kind, tenant_id, groups, revoked_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
+                       token_id, actor_subject, scope, principal_kind, tenant_id, email, groups,
+                       revoked_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL)",
                     params![
                         digest.as_slice(),
                         authority.iss,
@@ -1119,6 +1126,7 @@ impl Store {
                         authority.scope,
                         authority.dl_principal_kind,
                         authority.dl_tenant,
+                        authority.email,
                         groups,
                     ],
                 )?;
@@ -1130,8 +1138,8 @@ impl Store {
                         "INSERT INTO access_tokens (
                            verifier_hash, issuer, subject, audience, issued_at, not_before,
                            expires_at, token_id, actor_subject, scope, principal_kind, tenant_id,
-                           groups, revoked_at
-                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL)",
+                           email, groups, revoked_at
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL)",
                         &[
                             &digest,
                             &authority.iss,
@@ -1145,6 +1153,7 @@ impl Store {
                             &authority.scope,
                             &authority.dl_principal_kind,
                             &authority.dl_tenant,
+                            &authority.email,
                             &groups,
                         ],
                     )
@@ -1166,7 +1175,7 @@ impl Store {
                 .sqlite_connection()?
                 .query_row(
                     "SELECT issuer, subject, audience, issued_at, not_before, expires_at, token_id,
-                            actor_subject, scope, principal_kind, tenant_id, groups
+                            actor_subject, scope, principal_kind, tenant_id, email, groups
                      FROM access_tokens
                      WHERE verifier_hash = ?1 AND audience = ?2 AND revoked_at IS NULL
                        AND not_before <= ?3 AND expires_at > ?3",
@@ -1179,7 +1188,7 @@ impl Store {
                 let client = store.client().await?;
                 client.query_opt(
                     "SELECT issuer, subject, audience, issued_at, not_before, expires_at, token_id,
-                            actor_subject, scope, principal_kind, tenant_id, groups
+                            actor_subject, scope, principal_kind, tenant_id, email, groups
                      FROM access_tokens
                      WHERE verifier_hash = $1 AND audience = $2 AND revoked_at IS NULL
                        AND not_before <= $3 AND expires_at > $3",
@@ -1199,7 +1208,8 @@ impl Store {
                         scope: row.get(8),
                         dl_principal_kind: row.get(9),
                         dl_tenant: row.get(10),
-                        groups: groups_from_storage(&row.get::<_, String>(11)),
+                        email: row.get(11),
+                        groups: groups_from_storage(&row.get::<_, String>(12)),
                     })
                 })
                 .map_err(Into::into)
@@ -1423,7 +1433,8 @@ fn access_authority_from_sqlite_row(row: &rusqlite::Row<'_>) -> rusqlite::Result
         scope: row.get(8)?,
         dl_principal_kind: row.get(9)?,
         dl_tenant: row.get(10)?,
-        groups: groups_from_storage(&row.get::<_, String>(11)?),
+        email: row.get(11)?,
+        groups: groups_from_storage(&row.get::<_, String>(12)?),
     })
 }
 
@@ -1582,6 +1593,7 @@ struct AccessAuthority {
     scope: String,
     dl_principal_kind: String,
     dl_tenant: String,
+    email: Option<String>,
     groups: Vec<String>,
 }
 
@@ -1874,6 +1886,7 @@ async fn issue_access_token(
         scope: scope.clone(),
         dl_principal_kind: "human".to_owned(),
         dl_tenant: admitted.tenant_id,
+        email: admitted.email,
         groups,
     };
     let _ = admitted.expires_at;
@@ -2307,7 +2320,10 @@ fn admitted_connector_scope(value: &str, groups: &[String]) -> Result<String, Ht
     let scope = canonical_connector_scope(value)?;
     if matches!(
         scope.as_str(),
-        "connectors.catalog.read" | "connectors.invoke"
+        "connectors.catalog.read"
+            | "connectors.connections.self"
+            | "connectors.events.self"
+            | "connectors.invoke"
     ) || groups.iter().any(|group| group == "operator")
     {
         return Ok(scope);
@@ -2948,6 +2964,7 @@ mod tests {
             scope: "connectors.catalog.read".to_owned(),
             dl_principal_kind: "human".to_owned(),
             dl_tenant: config.tenant_id.clone(),
+            email: identity.email.clone(),
             groups: Vec::new(),
         };
         let access = format!("dl_access_v1_{}", "d".repeat(43));
@@ -3005,6 +3022,7 @@ mod tests {
             scope: "connectors.catalog.read connectors.invoke".to_owned(),
             dl_principal_kind: "human".to_owned(),
             dl_tenant: "tenant-dev".to_owned(),
+            email: Some("developer@example.test".to_owned()),
             groups: vec!["operator".to_owned()],
         };
         let credential = format!("dl_access_v1_{}", "a".repeat(43));
@@ -3071,6 +3089,13 @@ mod tests {
         assert_eq!(
             admitted_connector_scope("connectors.invoke", &["member".to_owned()]).unwrap(),
             "connectors.invoke"
+        );
+        assert_eq!(
+            admitted_connector_scope("connectors.events.self", &["member".to_owned()]).unwrap(),
+            "connectors.events.self"
+        );
+        assert!(
+            admitted_connector_scope("connectors.events.read", &["member".to_owned()]).is_err()
         );
         assert!(
             admitted_connector_scope(
