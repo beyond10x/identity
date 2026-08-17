@@ -228,8 +228,9 @@ literal `127.0.0.1` local-test origin.
 ## Deploy to the dev cluster
 
 Deployment composition belongs to the Daemonloom Cloud umbrella chart rather than this service
-repository. Its developer profile installs PostgreSQL, BuildKit, an ephemeral self-hosted registry,
-and Identity by immutable digest behind an internal TLS ingress.
+component. Its developer profile installs PostgreSQL and Identity by immutable digest behind an
+internal TLS ingress. Workstation Buildx pushes to the persistent development registry; in-cluster
+BuildKit is disabled.
 
 The chart creates a labeled Identity discovery `ExternalName` Service. A
 hostless harness login discovers the current cluster's CoreDNS service and cluster domain, tunnels
@@ -246,10 +247,10 @@ https://identity.dev.daemonloom.dev/oauth/callback/upstream
 
 Then run the Cloud developer deployment command with a JSON file containing `client_id` and
 `client_secret`. The command creates Kubernetes Secrets without putting their values in Helm,
-builds this exact clean Git commit inside the cluster, and installs the resulting digest.
+builds this exact clean Git commit locally, pushes its digest, and installs the resulting lock.
 
 ```bash
-../cloud/deploy/dev/deploy.sh --help
+../../scripts/dev/release-dev.sh --help
 ```
 
 The repositories contain no OAuth client secret, database password, registry password, or reusable
@@ -262,7 +263,7 @@ cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 scripts/check-audit.sh
-../cloud/deploy/tests/static.sh
+../cloud/tests/static.sh
 ```
 
 The directory and profile stores keep a separate SQL statement per backend, and the in-memory tests
