@@ -1,6 +1,6 @@
 # Daemonloom Identity
 
-This repository contains the first deployable human-login slice for Daemonloom. It owns upstream
+This component contains the first deployable human-login slice for Daemonloom. It owns upstream
 OpenID Connect login, tenant-scoped principal identity, opaque CLI sessions, and the server-side
 credential store. Product services such as the AI Agent Platform consume this identity; they do not
 run Google OAuth themselves.
@@ -253,7 +253,7 @@ builds this exact clean Git commit locally, pushes its digest, and installs the 
 ../../scripts/dev/release-dev.sh --help
 ```
 
-The repositories contain no OAuth client secret, database password, registry password, or reusable
+The monorepo contains no OAuth client secret, database password, registry password, or reusable
 login credential.
 
 ## Checks
