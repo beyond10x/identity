@@ -110,6 +110,13 @@ struct StaticGroupMembershipConfig {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DefaultTenantGroupsConfig {
+    tenant_id: String,
+    groups: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OrganizationTenantConfig {
     claim_value: String,
     tenant_id: String,
@@ -121,10 +128,19 @@ fn static_group_memberships() -> Result<StaticGroupMemberships> {
     let memberships: Vec<StaticGroupMembershipConfig> = serde_json::from_str(&source).context(
         "IDENTITY_STATIC_GROUP_MEMBERSHIPS_JSON must be a JSON array of tenant-scoped email assignments",
     )?;
-    StaticGroupMemberships::new(
+    let defaults_source =
+        env::var("IDENTITY_DEFAULT_TENANT_GROUPS_JSON").unwrap_or_else(|_| "[]".to_owned());
+    let defaults: Vec<DefaultTenantGroupsConfig> = serde_json::from_str(&defaults_source).context(
+        "IDENTITY_DEFAULT_TENANT_GROUPS_JSON must be a JSON array of tenant-scoped default groups",
+    )?;
+    StaticGroupMemberships::new_with_tenant_defaults(
         memberships
             .into_iter()
             .map(|membership| (membership.tenant_id, membership.email, membership.groups))
+            .collect(),
+        defaults
+            .into_iter()
+            .map(|membership| (membership.tenant_id, membership.groups))
             .collect(),
     )
 }

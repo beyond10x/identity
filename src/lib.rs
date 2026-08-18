@@ -226,6 +226,7 @@ impl WebClient {
 #[derive(Debug, Clone, Default)]
 pub struct StaticGroupMemberships {
     by_tenant_and_email: HashMap<(String, String), Vec<String>>,
+    defaults_by_tenant: HashMap<String, Vec<String>>,
 }
 
 impl StaticGroupMemberships {
@@ -236,35 +237,24 @@ impl StaticGroupMemberships {
     /// Returns an error for malformed emails, malformed or empty groups, or duplicate normalized
     /// email assignments.
     pub fn new(entries: Vec<(String, String, Vec<String>)>) -> Result<Self> {
+        Self::new_with_tenant_defaults(entries, Vec::new())
+    }
+
+    /// Validates exact email assignments plus groups granted to every verified member of an
+    /// admitted tenant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed tenant IDs, groups, emails, or duplicate assignments.
+    pub fn new_with_tenant_defaults(
+        entries: Vec<(String, String, Vec<String>)>,
+        tenant_defaults: Vec<(String, Vec<String>)>,
+    ) -> Result<Self> {
         let mut by_tenant_and_email = HashMap::new();
         for (tenant_id, email, groups) in entries {
-            let tenant_id = tenant_id.trim().to_owned();
-            if !(1..=128).contains(&tenant_id.len())
-                || !tenant_id.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
-                })
-            {
-                bail!("Identity static group tenant IDs must be bounded URL-safe ASCII");
-            }
+            let tenant_id = normalize_group_tenant_id(&tenant_id)?;
             let email = normalize_email(&email)?;
-            let groups = groups
-                .into_iter()
-                .map(|group| group.trim().to_ascii_lowercase())
-                .collect::<BTreeSet<_>>();
-            if groups.is_empty()
-                || groups.iter().any(|group| {
-                    !(1..=64).contains(&group.len())
-                        || !group.bytes().enumerate().all(|(index, byte)| {
-                            byte.is_ascii_lowercase()
-                                || byte.is_ascii_digit() && index > 0
-                                || matches!(byte, b'-' | b'_') && index > 0
-                        })
-                })
-            {
-                bail!(
-                    "Identity static groups must be non-empty lowercase names of at most 64 characters"
-                );
-            }
+            let groups = normalize_groups(groups)?;
             if by_tenant_and_email
                 .insert(
                     (tenant_id.clone(), email.clone()),
@@ -277,21 +267,74 @@ impl StaticGroupMemberships {
                 );
             }
         }
+        let mut defaults_by_tenant = HashMap::new();
+        for (tenant_id, groups) in tenant_defaults {
+            let tenant_id = normalize_group_tenant_id(&tenant_id)?;
+            let groups = normalize_groups(groups)?;
+            if defaults_by_tenant
+                .insert(tenant_id.clone(), groups)
+                .is_some()
+            {
+                bail!("Identity default groups repeat tenant {tenant_id}");
+            }
+        }
         Ok(Self {
             by_tenant_and_email,
+            defaults_by_tenant,
         })
     }
 
     fn groups_for(&self, tenant_id: &str, email: Option<&str>) -> Vec<String> {
-        email
-            .and_then(|email| normalize_email(email).ok())
-            .and_then(|email| {
+        let Some(email) = email.and_then(|email| normalize_email(email).ok()) else {
+            return Vec::new();
+        };
+        self.defaults_by_tenant
+            .get(tenant_id)
+            .into_iter()
+            .flatten()
+            .chain(
                 self.by_tenant_and_email
                     .get(&(tenant_id.to_owned(), email))
-                    .cloned()
-            })
-            .unwrap_or_default()
+                    .into_iter()
+                    .flatten(),
+            )
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
+}
+
+fn normalize_group_tenant_id(value: &str) -> Result<String> {
+    let tenant_id = value.trim().to_owned();
+    if !(1..=128).contains(&tenant_id.len())
+        || !tenant_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        bail!("Identity static group tenant IDs must be bounded URL-safe ASCII");
+    }
+    Ok(tenant_id)
+}
+
+fn normalize_groups(groups: Vec<String>) -> Result<Vec<String>> {
+    let groups = groups
+        .into_iter()
+        .map(|group| group.trim().to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    if groups.is_empty()
+        || groups.iter().any(|group| {
+            !(1..=64).contains(&group.len())
+                || !group.bytes().enumerate().all(|(index, byte)| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit() && index > 0
+                        || matches!(byte, b'-' | b'_') && index > 0
+                })
+        })
+    {
+        bail!("Identity static groups must be non-empty lowercase names of at most 64 characters");
+    }
+    Ok(groups.into_iter().collect())
 }
 
 fn normalize_email(value: &str) -> Result<String> {
@@ -2536,6 +2579,33 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn tenant_default_groups_are_granted_to_every_verified_member() {
+        let groups = StaticGroupMemberships::new_with_tenant_defaults(
+            vec![(
+                "tenant-a".to_owned(),
+                "operator@example.test".to_owned(),
+                vec!["operator".to_owned()],
+            )],
+            vec![("tenant-a".to_owned(), vec!["org-member".to_owned()])],
+        )
+        .unwrap();
+        assert_eq!(
+            groups.groups_for("tenant-a", Some("person@example.test")),
+            vec!["org-member"]
+        );
+        assert_eq!(
+            groups.groups_for("tenant-a", Some("operator@example.test")),
+            vec!["operator", "org-member"]
+        );
+        assert!(
+            groups
+                .groups_for("tenant-b", Some("person@example.test"))
+                .is_empty()
+        );
+        assert!(groups.groups_for("tenant-a", None).is_empty());
     }
 
     #[test]

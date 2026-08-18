@@ -96,11 +96,13 @@ cargo run --locked
 
 Browser applications are registered as exact public PKCE clients. Static group assignments are
 deployment configuration evaluated against the verified upstream email on every authority lookup;
-they are not copied into application databases or browser cookies. For example:
+tenant-default groups apply to every verified email admitted into that exact tenant. Neither form
+is copied into application databases or browser cookies. For example:
 
 ```bash
 IDENTITY_WEB_CLIENTS_JSON='[{"clientId":"daemonloom-status","redirectUri":"https://code.example.test/status/oauth/callback"}]'
 IDENTITY_STATIC_GROUP_MEMBERSHIPS_JSON='[{"tenantId":"local","email":"operator@example.test","groups":["operator"]}]'
+IDENTITY_DEFAULT_TENANT_GROUPS_JSON='[{"tenantId":"local","groups":["org-member"]}]'
 ```
 
 An internal Status or Zwirn application may resolve the current Identity session with `GET
