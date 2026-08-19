@@ -8,8 +8,10 @@ publish = false
 [features]
 # A loopback-only development login that mints a session for a typed mailbox with no upstream
 # identity provider. It is never a default feature, and `src/lib.rs` turns it into a compile error
-# whenever `debug_assertions` is off — which is every release build, including the one in
-# `Dockerfile`. `scripts/check-local-login-refused.sh` proves that refusal.
+# in any shipping profile: once when `debug_assertions` is off, and again — via the `optimized_build`
+# cfg `build.rs` derives from `OPT_LEVEL` — whenever the profile optimizes, so that
+# `RUSTFLAGS='-C debug-assertions=yes' cargo build --release` cannot sneak the route into an
+# optimized artifact. `scripts/check-local-login-refused.sh` proves both refusals.
 local-login = []
 
 [dependencies]

@@ -11,8 +11,10 @@
 //! refused three independent ways and each one alone is sufficient:
 //!
 //! 1. It is compiled only behind the non-default `local-login` feature, and `lib.rs` raises
-//!    `compile_error!` when that feature is combined with a profile that has `debug_assertions`
-//!    off. Every release build clears `debug_assertions`, so the deployed binary cannot contain
+//!    `compile_error!` when that feature is combined with any shipping profile. Two independent
+//!    predicates raise it: `debug_assertions` off (which every release build clears) and the
+//!    `optimized_build` cfg `build.rs` derives from the profile's `OPT_LEVEL` (which `RUSTFLAGS`
+//!    cannot force on, unlike `debug_assertions`). Either way the deployed binary cannot contain
 //!    this code — the attempt does not produce a flag to leave off, it produces a build failure.
 //! 2. `Dockerfile` passes no `--features`, so the image is built from the default set.
 //! 3. [`admitted`] refuses unless this process both listens on a loopback address and publishes a

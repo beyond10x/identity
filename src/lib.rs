@@ -41,12 +41,26 @@ mod screening;
 // A hosted Identity that mints a session for a mailbox somebody typed authenticates nobody. The
 // facility is therefore not a flag a deployment leaves off: enabling it in the profile every
 // deployment builds is this error, so no released binary can contain the code at all.
+//
+// Two independent predicates raise the error, because the first alone is forgeable. A release
+// profile clears `debug_assertions`, but `RUSTFLAGS='-C debug-assertions=yes' cargo build
+// --release` forces it back on, and that combination once compiled the route into an optimized
+// artifact. The second predicate closes that hole: `build.rs` reads the profile's `OPT_LEVEL`,
+// which `RUSTFLAGS` cannot reach, and sets `optimized_build` for every profile that optimizes.
 #[cfg(all(feature = "local-login", not(debug_assertions)))]
 compile_error!(
     "feature `local-login` mints an Identity session for a typed mailbox with no upstream identity \
      provider, which is a complete authentication bypass for every product that trusts this \
      service. It is admitted only in a debug-profile build serving a loopback listener and origin. \
      A deployment builds --release, where enabling it is this compile error."
+);
+#[cfg(all(feature = "local-login", optimized_build))]
+compile_error!(
+    "feature `local-login` was combined with an optimizing profile (`opt-level` is not 0), so it \
+     would compile the loopback development login into a shipped artifact. Unlike \
+     `debug_assertions`, the optimization level cannot be forced back on from `RUSTFLAGS` \
+     (`-C debug-assertions=yes` leaves it untouched); `build.rs` reads it from the resolved \
+     profile. Build the feature only in an unoptimized development profile on this machine."
 );
 
 const LOGIN_LIFETIME_SECONDS: i64 = 10 * 60;

@@ -24,10 +24,14 @@ Read in order:
 - Distributed admission is unproven: the development composition fixes Identity at one replica.
   Do not raise the replica count without proving check-and-insert admission across processes.
 - The `local-login` feature signs a person in as whatever mailbox they name, which in a deployment
-  would authenticate nobody. It is refused three ways at once — a release build enabling it fails
-  to compile, `Dockerfile` selects no feature, and a feature build exits unless both its listener
-  and its public origin are loopback. Never weaken any of the three, and never make it a default
-  feature; `scripts/check-local-login-refused.sh` is the gate that holds the first two.
+  would authenticate nobody. It is refused three ways at once — a build in any shipping profile
+  fails to compile, `Dockerfile` selects no feature, and a feature build exits unless both its
+  listener and its public origin are loopback. The compile-time refusal fires on two independent
+  predicates so `RUSTFLAGS='-C debug-assertions=yes'` cannot force the route into an optimized
+  artifact: `not(debug_assertions)` and the `optimized_build` cfg `build.rs` derives from
+  `OPT_LEVEL`. Never weaken any of the three, never remove the second predicate, and never make it
+  a default feature; `scripts/check-local-login-refused.sh` is the gate that holds the first two,
+  and `scripts/check-local.sh` runs it in every `--release` and `--all` pre-release suite.
 
 ## Gate
 
