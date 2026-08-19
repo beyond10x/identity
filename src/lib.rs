@@ -33,8 +33,21 @@ use url::Url;
 use zeroize::Zeroizing;
 
 mod directory;
+#[cfg(feature = "local-login")]
+mod local_login;
 mod profile;
 mod screening;
+
+// A hosted Identity that mints a session for a mailbox somebody typed authenticates nobody. The
+// facility is therefore not a flag a deployment leaves off: enabling it in the profile every
+// deployment builds is this error, so no released binary can contain the code at all.
+#[cfg(all(feature = "local-login", not(debug_assertions)))]
+compile_error!(
+    "feature `local-login` mints an Identity session for a typed mailbox with no upstream identity \
+     provider, which is a complete authentication bypass for every product that trusts this \
+     service. It is admitted only in a debug-profile build serving a loopback listener and origin. \
+     A deployment builds --release, where enabling it is this compile error."
+);
 
 const LOGIN_LIFETIME_SECONDS: i64 = 10 * 60;
 const CODE_LIFETIME_SECONDS: i64 = 60;
@@ -1539,6 +1552,10 @@ struct AuthorizeQuery {
     nonce: String,
     code_challenge: String,
     code_challenge_method: String,
+    /// The mailbox to sign in as, read only by a loopback development build. A deployed Identity
+    /// does not have this field, so the standard parameter is ignored there as any unknown one is.
+    #[cfg(feature = "local-login")]
+    login_hint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2019,8 +2036,13 @@ async fn logout(
 async fn authorize(
     State(state): State<AppState>,
     Query(query): Query<AuthorizeQuery>,
-) -> Result<Redirect, HttpError> {
+) -> Result<Response, HttpError> {
     validate_authorization_request(&state.config, &query)?;
+    // A loopback development build has no provider to redirect to, and signs the request in itself.
+    #[cfg(feature = "local-login")]
+    if local_login::admitted(&state.config) {
+        return local_login::complete(&state.config, &state.store, &query).await;
+    }
     let upstream_state = random_token(32).map_err(HttpError::internal)?;
     let upstream_nonce = random_token(32).map_err(HttpError::internal)?;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
@@ -2068,7 +2090,17 @@ async fn authorize(
         })
         .await
         .map_err(HttpError::internal)?;
-    Ok(Redirect::temporary(authorization_url.as_str()))
+    Ok(Redirect::temporary(authorization_url.as_str()).into_response())
+}
+
+/// Whether a loopback development build may complete a sign-in without an upstream provider.
+///
+/// Exists so `main.rs` refuses to serve at all when this binary carries the local development
+/// login and the configuration is not a loopback one.
+#[cfg(feature = "local-login")]
+#[must_use]
+pub fn local_login_admitted(config: &Config) -> bool {
+    local_login::admitted(config)
 }
 
 async fn upstream_callback(
@@ -2515,6 +2547,128 @@ mod tests {
             nonce: random_token(32).unwrap(),
             code_challenge: pkce_challenge(&"a".repeat(64)),
             code_challenge_method: "S256".to_owned(),
+            #[cfg(feature = "local-login")]
+            login_hint: None,
+        }
+    }
+
+    /// A hosted Identity is defined by the two facts a deployment cannot avoid: it listens on a
+    /// routable address and publishes an HTTPS origin. Both make the local login inadmissible.
+    #[cfg(feature = "local-login")]
+    fn hosted_config() -> Config {
+        Config {
+            listen: "0.0.0.0:8080".parse().unwrap(),
+            public_origin: Url::parse("https://identity.example.test/").unwrap(),
+            ..config()
+        }
+    }
+
+    #[cfg(feature = "local-login")]
+    #[test]
+    fn local_login_is_admitted_only_by_a_loopback_listener_and_origin() {
+        assert!(
+            local_login::admitted(&config()),
+            "a 127.0.0.1 listener publishing a 127.0.0.1 HTTP origin is the local stack"
+        );
+        assert!(
+            !local_login::admitted(&hosted_config()),
+            "a deployed Identity must never admit the local login"
+        );
+        for (listen, origin) in [
+            ("0.0.0.0:8080", "http://127.0.0.1:8080/"),
+            ("127.0.0.1:8080", "https://identity.example.test/"),
+            ("10.0.0.7:8080", "http://10.0.0.7:8080/"),
+        ] {
+            let config = Config {
+                listen: listen.parse().unwrap(),
+                public_origin: Url::parse(origin).unwrap(),
+                ..config()
+            };
+            assert!(
+                !local_login::admitted(&config),
+                "{listen} serving {origin} is reachable from off the machine"
+            );
+        }
+    }
+
+    #[cfg(feature = "local-login")]
+    #[tokio::test]
+    async fn deployed_configuration_refuses_the_local_login_path() {
+        let store = Store::in_memory().unwrap();
+        let mut query = authorization_query();
+        query.login_hint = Some("person@example.test".to_owned());
+
+        let refused = local_login::complete(&hosted_config(), &store, &query)
+            .await
+            .expect_err("a deployed Identity must refuse to mint a session for a typed mailbox");
+        assert_eq!(refused.status, StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "local-login")]
+    #[tokio::test]
+    async fn local_login_mints_the_same_authorization_code_the_upstream_callback_does() {
+        let store = Store::in_memory().unwrap();
+        let mut query = authorization_query();
+        query.login_hint = Some("  Person@Example.Test ".to_owned());
+
+        let response = local_login::complete(&config(), &store, &query)
+            .await
+            .unwrap();
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("the local login redirects to the client callback");
+        let location = Url::parse(location).unwrap();
+        assert_eq!(location.path(), "/callback");
+        let returned = location
+            .query_pairs()
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(returned.get("state"), Some(&query.state));
+
+        let authorization = store
+            .take_code(returned.get("code").unwrap())
+            .await
+            .unwrap()
+            .expect("the authorization code is the ordinary one /oauth/token consumes");
+        assert_eq!(authorization.email.as_deref(), Some("person@example.test"));
+        assert_eq!(authorization.tenant_id, "tenant-dev");
+        assert_eq!(authorization.code_challenge, query.code_challenge);
+        assert_eq!(authorization.redirect_uri, query.redirect_uri);
+        assert!(
+            authorization.subject.contains("person@example.test"),
+            "the session subject names the person who signed in: {}",
+            authorization.subject
+        );
+    }
+
+    /// Without a mailbox the local login can only ask for one, so a bare `/oauth/authorize` in a
+    /// browser is a form rather than a redirect into a provider that is not configured here.
+    #[cfg(feature = "local-login")]
+    #[tokio::test]
+    async fn local_login_without_a_mailbox_asks_for_one() {
+        let store = Store::in_memory().unwrap();
+        let response = local_login::complete(&config(), &store, &authorization_query())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::LOCATION).is_none());
+    }
+
+    #[cfg(feature = "local-login")]
+    #[tokio::test]
+    async fn local_login_refuses_a_mailbox_the_static_group_configuration_would_refuse() {
+        let store = Store::in_memory().unwrap();
+        for hint in ["", "not-an-address", "two@at@signs", "person@example test"] {
+            let mut query = authorization_query();
+            query.login_hint = Some(hint.to_owned());
+            assert!(
+                local_login::complete(&config(), &store, &query)
+                    .await
+                    .is_err(),
+                "{hint:?} is not a mailbox address"
+            );
         }
     }
 

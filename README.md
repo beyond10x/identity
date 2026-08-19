@@ -94,6 +94,35 @@ IDENTITY_DATABASE_PATH=/tmp/daemonloom-identity/private/identity.sqlite3 \
 cargo run --locked
 ```
 
+## Local development sign-in
+
+A workstation has no upstream provider to redirect to, so the flow above cannot complete there and
+the local process stack shows every consumer as signed out. The optional `local-login` feature
+replaces exactly the step that has no counterpart: with it, `/oauth/authorize` answers with a page
+asking which mailbox to sign in as, and then mints the ordinary authorization code. Everything
+after that is unchanged — the same one-use code, the same `/oauth/token` exchange, the same opaque
+session row, the same tenant resolution, and the same groups
+`IDENTITY_STATIC_GROUP_MEMBERSHIPS_JSON` and `IDENTITY_DEFAULT_TENANT_GROUPS_JSON` already assign.
+
+```bash
+cargo run --locked --features local-login   # then open /oauth/authorize, or run `zwirn login`
+```
+
+Issuing a session for a mailbox somebody typed authenticates nobody, so in a deployment this is not
+a setting to leave off. Three independent rules refuse it, and any one of them is sufficient:
+
+- **The release profile refuses to compile it.** `src/lib.rs` raises `compile_error!` whenever the
+  feature is combined with `debug_assertions` off. Every release build clears `debug_assertions`,
+  so the deployed binary cannot contain the code — the attempt is a build failure, not a flag.
+- **The image selects no feature.** `Dockerfile` runs `cargo build --locked --release` with no
+  `--features`, so the shipped binary is the default feature set.
+- **A feature build refuses a reachable address.** The process exits before binding unless it both
+  listens on a loopback address and publishes a loopback HTTP origin, and the request path checks
+  the same predicate again.
+
+`scripts/check-local-login-refused.sh` proves the first two: it fails unless
+`cargo check --release --features local-login` fails and the `Dockerfile` build stays feature-free.
+
 Browser applications are registered as exact public PKCE clients. Static group assignments are
 deployment configuration evaluated against the verified upstream email on every authority lookup;
 tenant-default groups apply to every verified email admitted into that exact tenant. Neither form
@@ -262,8 +291,11 @@ login credential.
 
 ```bash
 cargo test --locked
+cargo test --locked --features local-login
 cargo clippy --all-targets --locked -- -D warnings
+cargo clippy --all-targets --locked --features local-login -- -D warnings
 cargo fmt --all -- --check
+scripts/check-local-login-refused.sh
 scripts/check-audit.sh
 ../cloud/tests/static.sh
 ```

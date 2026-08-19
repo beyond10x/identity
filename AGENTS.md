@@ -23,13 +23,21 @@ Read in order:
   encoded as a global tenant assumption.
 - Distributed admission is unproven: the development composition fixes Identity at one replica.
   Do not raise the replica count without proving check-and-insert admission across processes.
+- The `local-login` feature signs a person in as whatever mailbox they name, which in a deployment
+  would authenticate nobody. It is refused three ways at once — a release build enabling it fails
+  to compile, `Dockerfile` selects no feature, and a feature build exits unless both its listener
+  and its public origin are loopback. Never weaken any of the three, and never make it a default
+  feature; `scripts/check-local-login-refused.sh` is the gate that holds the first two.
 
 ## Gate
 
 ```text
 cargo test --workspace --locked
+cargo test --workspace --locked --features local-login
 cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --locked --features local-login -- -D warnings
 cargo fmt --all --check
+bash scripts/check-local-login-refused.sh
 ```
 
 Run `bash scripts/check-local.sh --release` from the monorepo root before treating a

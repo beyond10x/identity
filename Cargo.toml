@@ -5,6 +5,13 @@ edition = "2024"
 rust-version = "1.88"
 publish = false
 
+[features]
+# A loopback-only development login that mints a session for a typed mailbox with no upstream
+# identity provider. It is never a default feature, and `src/lib.rs` turns it into a compile error
+# whenever `debug_assertions` is off — which is every release build, including the one in
+# `Dockerfile`. `scripts/check-local-login-refused.sh` proves that refusal.
+local-login = []
+
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["form", "json", "query", "tokio"] }

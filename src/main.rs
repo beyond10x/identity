@@ -25,6 +25,18 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Arc::new(config_from_environment()?);
+    // This binary carries the local development login, which signs a person in as any mailbox they
+    // type. It refuses to serve anything a second machine could reach, before it binds a listener.
+    #[cfg(feature = "local-login")]
+    if !daemonloom_identity::local_login_admitted(&config) {
+        bail!(
+            "this binary was built with the local development login, so it serves only a loopback \
+             listener publishing a loopback HTTP origin; IDENTITY_LISTEN={} and \
+             IDENTITY_PUBLIC_ORIGIN={} are reachable from elsewhere",
+            config.listen,
+            config.public_origin
+        );
+    }
     let http_client = openidconnect::reqwest::ClientBuilder::new()
         .redirect(openidconnect::reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(5))
