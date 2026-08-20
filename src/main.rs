@@ -12,7 +12,7 @@ use daemonloom_identity::{
     WebClient, discover_upstream, router,
 };
 use serde::Deserialize;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
@@ -24,7 +24,20 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let config = Arc::new(config_from_environment()?);
+    // A posture stated on the command line and nowhere else. An environment variable or a config
+    // field can be set by something a person never reads; an argument is typed deliberately and is
+    // visible in the process list of whatever is running. The gateway states its posture the same
+    // way (`foundation/llmgw/src/main.rs`), and no deployment manifest passes this flag — a test
+    // in this component fails if one ever does.
+    let insecure = env::args().skip(1).any(|argument| argument == "--insecure");
+    let config = Arc::new(config_from_environment(insecure)?);
+    if insecure {
+        warn!(
+            "serving WITH PLAINTEXT endpoints admitted (--insecure): the Connector endpoint this \
+             Identity advertises may be http, so a session it issues can name an endpoint no \
+             transport protects"
+        );
+    }
     // This binary carries the local development login, which signs a person in as any mailbox they
     // type. It refuses to serve anything a second machine could reach, before it binds a listener.
     #[cfg(feature = "local-login")]
@@ -59,7 +72,7 @@ async fn main() -> Result<()> {
         .context("serve identity HTTP")
 }
 
-fn config_from_environment() -> Result<Config> {
+fn config_from_environment(insecure: bool) -> Result<Config> {
     let listen = env::var("IDENTITY_LISTEN")
         .unwrap_or_else(|_| "0.0.0.0:8080".to_owned())
         .parse()
@@ -77,7 +90,7 @@ fn config_from_environment() -> Result<Config> {
     Ok(Config {
         listen,
         public_origin,
-        connectors_endpoint: optional_connectors_endpoint()?,
+        connectors_endpoint: optional_connectors_endpoint(insecure)?,
         tenant_id: required("IDENTITY_TENANT_ID")?,
         cli_client_id: env::var("IDENTITY_CLI_CLIENT_ID")
             .unwrap_or_else(|_| "daemonloom-harness-cli".to_owned()),
@@ -157,20 +170,21 @@ fn static_group_memberships() -> Result<StaticGroupMemberships> {
     )
 }
 
-fn optional_connectors_endpoint() -> Result<Option<Url>> {
+fn optional_connectors_endpoint(insecure: bool) -> Result<Option<Url>> {
     let Some(value) = env::var("IDENTITY_CONNECTORS_ENDPOINT")
         .ok()
         .filter(|value| !value.trim().is_empty())
     else {
         return Ok(None);
     };
-    normalize_connectors_endpoint(&value).map(Some)
+    normalize_connectors_endpoint(&value, insecure).map(Some)
 }
 
-fn normalize_connectors_endpoint(value: &str) -> Result<Url> {
+fn normalize_connectors_endpoint(value: &str, insecure: bool) -> Result<Url> {
     let endpoint =
         Url::parse(value).context("IDENTITY_CONNECTORS_ENDPOINT must be an absolute HTTPS URL")?;
-    if endpoint.scheme() != "https"
+    let scheme_admitted = endpoint.scheme() == "https" || (insecure && endpoint.scheme() == "http");
+    if !scheme_admitted
         || endpoint.host_str().is_none()
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
@@ -367,14 +381,41 @@ mod tests {
 
     #[test]
     fn connector_discovery_endpoint_is_a_closed_https_base() {
-        assert!(normalize_connectors_endpoint("https://code.example/api/connectors/v1").is_ok());
+        assert!(
+            normalize_connectors_endpoint("https://code.example/api/connectors/v1", false).is_ok()
+        );
         for endpoint in [
             "http://code.example/api/connectors/v1",
             "https://user@code.example/api/connectors/v1",
             "https://code.example/api/connectors/v1/",
             "https://code.example/api/connectors/v1?next=evil",
         ] {
-            assert!(normalize_connectors_endpoint(endpoint).is_err());
+            assert!(normalize_connectors_endpoint(endpoint, false).is_err());
+        }
+    }
+
+    #[test]
+    fn plaintext_is_admitted_only_when_the_posture_was_stated_on_the_command_line() {
+        // Without --insecure a plaintext endpoint is refused, whatever else is true of it.
+        assert!(
+            normalize_connectors_endpoint("http://127.0.0.1:18080/api/connectors/v1", false)
+                .is_err()
+        );
+        // With it, plaintext is admitted — and every other rule still holds, so the flag widens
+        // exactly one thing rather than turning the check off.
+        assert!(
+            normalize_connectors_endpoint("http://127.0.0.1:18080/api/connectors/v1", true).is_ok()
+        );
+        for endpoint in [
+            "http://user@127.0.0.1:18080/api/connectors/v1",
+            "http://127.0.0.1:18080/api/connectors/v1/",
+            "http://127.0.0.1:18080/api/connectors/v1?next=evil",
+            "http://127.0.0.1:18080/",
+        ] {
+            assert!(
+                normalize_connectors_endpoint(endpoint, true).is_err(),
+                "{endpoint}"
+            );
         }
     }
 }
