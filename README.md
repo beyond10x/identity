@@ -281,7 +281,7 @@ Then run the Cloud developer deployment command with a JSON file containing `cli
 builds this exact clean Git commit locally, pushes its digest, and installs the resulting lock.
 
 ```bash
-../../scripts/dev/release-dev.sh --help
+../../deployments/dev/release.sh --help
 ```
 
 The monorepo contains no OAuth client secret, database password, registry password, or reusable
