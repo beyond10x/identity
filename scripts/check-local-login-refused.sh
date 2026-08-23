@@ -30,7 +30,7 @@ refuse() {
   exit 1
 }
 
-output=$(mktemp "${TMPDIR:-/tmp}/daemonloom-local-login-guard.XXXXXXXX")
+output=$(mktemp "${TMPDIR:-/tmp}/identity-local-login-guard.XXXXXXXX")
 trap 'rm -f -- "$output"' EXIT
 
 # A release build with the feature must fail, and fail *because of* the local-login refusal rather
@@ -68,7 +68,7 @@ fi
 
 # 4. The development profile that does admit the feature still compiles and passes its runtime
 #    guards, so the refusal is enforced without leaving the feature itself unexercised.
-test_output=$(mktemp "${TMPDIR:-/tmp}/daemonloom-local-login-test.XXXXXXXX")
+test_output=$(mktemp "${TMPDIR:-/tmp}/identity-local-login-test.XXXXXXXX")
 trap 'rm -f -- "$output" "$test_output"' EXIT
 if ! cargo test --locked --features local-login local_login >"$test_output" 2>&1; then
   printf '%s\n' "$(cat "$test_output")" >&2

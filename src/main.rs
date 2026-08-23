@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
-use daemonloom_identity::{
+use identity::{
     AppState, Config, OrganizationDomainPolicy, SecretValue, StaticGroupMemberships, Store,
     WebClient, discover_upstream, router,
 };
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
     // This binary carries the local development login, which signs a person in as any mailbox they
     // type. It refuses to serve anything a second machine could reach, before it binds a listener.
     #[cfg(feature = "local-login")]
-    if !daemonloom_identity::local_login_admitted(&config) {
+    if !identity::local_login_admitted(&config) {
         bail!(
             "this binary was built with the local development login, so it serves only a loopback \
              listener publishing a loopback HTTP origin; IDENTITY_LISTEN={} and \
@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("bind {}", config.listen))?;
-    info!(listen = %config.listen, issuer = %config.public_origin, "daemonloom identity listening");
+    info!(listen = %config.listen, issuer = %config.public_origin, "identity listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -93,7 +93,7 @@ fn config_from_environment(insecure: bool) -> Result<Config> {
         connectors_endpoint: optional_connectors_endpoint(insecure)?,
         tenant_id: required("IDENTITY_TENANT_ID")?,
         cli_client_id: env::var("IDENTITY_CLI_CLIENT_ID")
-            .unwrap_or_else(|_| "daemonloom-harness-cli".to_owned()),
+            .unwrap_or_else(|_| "identity-cli".to_owned()),
         web_clients: web_clients()?,
         upstream_issuer: required_issuer("IDENTITY_UPSTREAM_ISSUER")?,
         upstream_client_id: required("IDENTITY_UPSTREAM_CLIENT_ID")?,
@@ -103,7 +103,7 @@ fn config_from_environment(insecure: bool) -> Result<Config> {
         database_url: optional_database_url()?,
         database_path: PathBuf::from(
             env::var("IDENTITY_DATABASE_PATH")
-                .unwrap_or_else(|_| "/var/lib/daemonloom-identity/identity.sqlite3".to_owned()),
+                .unwrap_or_else(|_| "/var/lib/identity/identity.sqlite3".to_owned()),
         ),
     })
 }

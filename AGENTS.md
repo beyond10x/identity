@@ -52,23 +52,31 @@ cargo clippy --workspace --all-targets --locked --features local-login -- -D war
 cargo fmt --all --check
 bash scripts/check-local-login-refused.sh
 bash scripts/check-audit.sh
+bash scripts/check-brand.sh
 bash scripts/check-secrets.sh
 ```
 
 `bash scripts/gate.sh` runs the whole sequence; each check script also runs standalone. Green
 here is the bar for main.
 
-## Pending per the extraction plan
+## Extraction plan status
 
-This is step 1 of the
-[identity extraction plan](https://github.com/daemonloom/daemonloom/blob/a7c400179d398c3b884da5f6b386db0c8c5dc462/architecture/docs/reviews/2026-08-23-identity-extraction-plan.md):
-extraction only, no renames.
+This repository follows the
+[identity extraction plan](https://github.com/daemonloom/daemonloom/blob/a7c400179d398c3b884da5f6b386db0c8c5dc462/architecture/docs/reviews/2026-08-23-identity-extraction-plan.md).
 
-- **M1 — de-brand** is pending: the tree deliberately still carries daemonloom strings (crate
-  name, audience URN, well-known route, docs), and there is no brand fence here by design until
-  M1 lands. The product name decision (I-1) is open with Timo and blocks M1.
+- **Step 1 — extraction** landed 2026-08-23: full history, and the monorepo consumes a pinned
+  submodule checkout at `foundation/identity`.
+- **M1 — de-brand** landed 2026-08-23. I-1 is resolved: the product's name is **identity**
+  (Timo, 2026-08-23). I-2 took its default: a hard cut with no compatibility alias — the dev
+  cluster was the only consumer, and the monorepo callers moved in the same wave. The crate and
+  binary are `identity`, CLI discovery is `/.well-known/identity-cli-login`, and
+  `scripts/check-brand.sh` is the fence: it fails the gate on any surface regression, with the
+  allowed classes documented in the script (pinned provenance URLs, the extraction-provenance
+  phrase, the `urn:daemonloom:*` audience vocabulary and `x-daemonloom-audience` header held for
+  M2, and the bot App machinery).
 - **M2 — audience registry** is pending: the hardcoded connectors downstream becomes a configured
-  registry entry. M1 and M2 come before any new identity feature.
+  registry entry, and the audience vocabulary above becomes deployment configuration. M2 comes
+  before any new identity feature.
 
 ## Safety
 

@@ -1693,7 +1693,7 @@ mod tests {
             public_origin: url::Url::parse("https://identity.example.test/").unwrap(),
             connectors_endpoint: None,
             tenant_id: TENANT.to_owned(),
-            cli_client_id: "daemonloom-harness-cli".to_owned(),
+            cli_client_id: "harness-cli".to_owned(),
             web_clients: Vec::new(),
             upstream_issuer: "https://accounts.example.test".to_owned(),
             upstream_client_id: "upstream-client".to_owned(),

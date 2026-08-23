@@ -1,6 +1,6 @@
-# Daemonloom Identity
+# identity
 
-This component contains the first deployable human-login slice for Daemonloom. It owns upstream
+This component contains the first deployable human-login slice for the platform. It owns upstream
 OpenID Connect login, tenant-scoped principal identity, opaque CLI sessions, and the server-side
 credential store. Product services such as the AI Agent Platform consume this identity; they do not
 run Google OAuth themselves.
@@ -16,12 +16,12 @@ The implemented CLI flow is:
 
 ```text
 agent-harness login [HOST]
-  -> GET /.well-known/daemonloom-cli-login
+  -> GET /.well-known/identity-cli-login
   -> browser authorization with state + nonce + S256 PKCE
-  -> daemonloom-identity redirects to configured upstream OIDC (Google in dev)
+  -> identity redirects to configured upstream OIDC (Google in dev)
   -> exact loopback callback
   -> one-use authorization-code exchange
-  -> opaque Daemonloom session stored by the CLI
+  -> opaque identity session stored by the CLI
 ```
 
 Google access and refresh tokens never leave the identity process and are not persisted by this
@@ -90,7 +90,7 @@ IDENTITY_UPSTREAM_CLIENT_ID='your-client-id' \
 IDENTITY_UPSTREAM_CLIENT_SECRET='your-client-secret' \
 IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM=hd \
 IDENTITY_ORGANIZATION_TENANTS_JSON='[{"claimValue":"example.com","tenantId":"local"}]' \
-IDENTITY_DATABASE_PATH=/tmp/daemonloom-identity/private/identity.sqlite3 \
+IDENTITY_DATABASE_PATH=/tmp/identity/private/identity.sqlite3 \
 cargo run --locked
 ```
 
@@ -129,7 +129,7 @@ tenant-default groups apply to every verified email admitted into that exact ten
 is copied into application databases or browser cookies. For example:
 
 ```bash
-IDENTITY_WEB_CLIENTS_JSON='[{"clientId":"daemonloom-status","redirectUri":"https://code.example.test/status/oauth/callback"}]'
+IDENTITY_WEB_CLIENTS_JSON='[{"clientId":"status-web","redirectUri":"https://code.example.test/status/oauth/callback"}]'
 IDENTITY_STATIC_GROUP_MEMBERSHIPS_JSON='[{"tenantId":"local","email":"operator@example.test","groups":["operator"]}]'
 IDENTITY_DEFAULT_TENANT_GROUPS_JSON='[{"tenantId":"local","groups":["org-member"]}]'
 ```
@@ -258,7 +258,7 @@ literal `127.0.0.1` local-test origin.
 
 ## Deploy to the dev cluster
 
-Deployment composition belongs to the Daemonloom Cloud umbrella chart rather than this service
+Deployment composition belongs to the platform's cloud umbrella chart rather than this service
 component. Its developer profile installs PostgreSQL and Identity by immutable digest behind an
 internal TLS ingress. Workstation Buildx pushes to the persistent development registry; in-cluster
 BuildKit is disabled.
@@ -266,14 +266,14 @@ BuildKit is disabled.
 The chart creates a labeled Identity discovery `ExternalName` Service. A
 hostless harness login discovers the current cluster's CoreDNS service and cluster domain, tunnels
 DNS-over-TCP through the Kubernetes API, and resolves that Service's CNAME to the public HTTPS
-origin. The service record exists only in a cluster where Daemonloom Identity is deployed;
+origin. The service record exists only in a cluster where identity is deployed;
 the CLI does not derive a company domain from a Kubernetes context name.
 
 Register the chart's public Identity origin plus `/oauth/callback/upstream` as the Google redirect
 URI. For example:
 
 ```text
-https://identity.dev.daemonloom.dev/oauth/callback/upstream
+https://identity.dev.example.com/oauth/callback/upstream
 ```
 
 Then run the Cloud developer deployment command with a JSON file containing `client_id` and

@@ -1772,7 +1772,7 @@ pub fn router(state: AppState) -> Router {
         .route("/livez", get(liveness))
         .route("/readyz", get(readiness))
         .route("/healthz", get(readiness))
-        .route("/.well-known/daemonloom-cli-login", get(login_metadata))
+        .route("/.well-known/identity-cli-login", get(login_metadata))
         .route("/oauth/authorize", get(authorize))
         .route("/oauth/callback/upstream", get(upstream_callback))
         .route("/oauth/token", post(exchange_token))
@@ -2521,10 +2521,10 @@ mod tests {
                 Url::parse("https://code.example.test/api/connectors/v1").unwrap(),
             ),
             tenant_id: "tenant-dev".to_owned(),
-            cli_client_id: "daemonloom-harness-cli".to_owned(),
+            cli_client_id: "harness-cli".to_owned(),
             web_clients: vec![
                 WebClient::new(
-                    "daemonloom-status",
+                    "status-web",
                     "https://code.example.test/status/oauth/callback",
                 )
                 .unwrap(),
@@ -2554,7 +2554,7 @@ mod tests {
     fn authorization_query() -> AuthorizeQuery {
         AuthorizeQuery {
             response_type: "code".to_owned(),
-            client_id: "daemonloom-harness-cli".to_owned(),
+            client_id: "harness-cli".to_owned(),
             redirect_uri: "http://127.0.0.1:43123/callback".to_owned(),
             scope: "openid profile email".to_owned(),
             state: random_token(32).unwrap(),
@@ -2702,7 +2702,7 @@ mod tests {
     #[test]
     fn authorization_accepts_only_the_registered_web_callback() {
         let mut query = authorization_query();
-        query.client_id = "daemonloom-status".to_owned();
+        query.client_id = "status-web".to_owned();
         query.redirect_uri = "https://code.example.test/status/oauth/callback".to_owned();
         validate_authorization_request(&config(), &query).unwrap();
 
@@ -2858,7 +2858,7 @@ mod tests {
         let store = Store::in_memory().unwrap();
         let authorization = PendingAuthorization {
             created_at: unix_time().unwrap(),
-            client_id: "daemonloom-harness-cli".to_owned(),
+            client_id: "harness-cli".to_owned(),
             redirect_uri: "http://127.0.0.1:43123/callback".to_owned(),
             code_challenge: pkce_challenge(&"b".repeat(64)),
             subject: "google-subject".to_owned(),
