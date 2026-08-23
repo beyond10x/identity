@@ -2407,13 +2407,15 @@ fn bootstrap_connector_scope(value: &str) -> Result<String, HttpError> {
 
 fn admitted_connector_scope(value: &str, groups: &[String]) -> Result<String, HttpError> {
     let scope = canonical_connector_scope(value)?;
-    if matches!(
-        scope.as_str(),
-        "connectors.catalog.read"
-            | "connectors.connections.self"
-            | "connectors.events.self"
-            | "connectors.invoke"
-    ) || groups.iter().any(|group| group == "operator")
+    if scope.split(' ').all(|member| {
+        matches!(
+            member,
+            "connectors.catalog.read"
+                | "connectors.connections.self"
+                | "connectors.events.self"
+                | "connectors.invoke"
+        )
+    }) || groups.iter().any(|group| group == "operator")
     {
         return Ok(scope);
     }
@@ -3335,9 +3337,25 @@ mod tests {
         assert!(
             admitted_connector_scope("connectors.events.read", &["member".to_owned()]).is_err()
         );
-        assert!(
+        assert_eq!(
             admitted_connector_scope(
                 "connectors.catalog.read connectors.invoke",
+                &["member".to_owned()],
+            )
+            .unwrap(),
+            "connectors.catalog.read connectors.invoke"
+        );
+        assert_eq!(
+            admitted_connector_scope(
+                "connectors.catalog.read connectors.connections.self connectors.events.self connectors.invoke",
+                &["member".to_owned()],
+            )
+            .unwrap(),
+            "connectors.catalog.read connectors.connections.self connectors.events.self connectors.invoke"
+        );
+        assert!(
+            admitted_connector_scope(
+                "connectors.catalog.read connectors.events.read",
                 &["member".to_owned()],
             )
             .is_err()
