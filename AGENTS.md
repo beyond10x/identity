@@ -2,8 +2,9 @@
 
 This component owns Daemonloom's tenant-scoped principal identity: upstream OpenID Connect login,
 opaque CLI sessions, the server-side credential store, and the short-lived access-token authority
-that Connectors resolves. The root [`AGENTS.md`](../../AGENTS.md) applies throughout; this file
-adds component rules.
+that Connectors resolves. The monorepo root
+[`AGENTS.md`](https://github.com/daemonloom/daemonloom/blob/a7c400179d398c3b884da5f6b386db0c8c5dc462/AGENTS.md)
+applies throughout; this file adds component rules.
 
 Read in order:
 
