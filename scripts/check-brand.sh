@@ -1,33 +1,37 @@
 #!/usr/bin/env bash
-# The former brand names (b10x, codewandler) are banned at the surface of
-# this repository. Exactly two classes remain exempt:
-#   1. the wire-visible audience vocabulary — the `urn:b10x:*` audience URNs
-#      and the `x-b10x-audience` request header. These are minted into issued
-#      tokens and required verbatim by every relying party, so they move only with
-#      M2's audience registry, as a protocol change with a migration.
-#   2. the b10x-bot GitHub App machinery — scripts/as-bot.sh, bot-token.sh
-#      and check-bot-files.py carry the App's own name and its B10X_BOT_* env
-#      vars, functional identifiers that rename only together with the App itself.
-# and this check. Provenance URLs into the old monorepo and the extraction-provenance
-# phrase are gone: do not re-add exemptions for them. A line that carries an allowed
-# token AND a stale mention still fails — the allowance is per token, not per line.
+# The former brand name (and `codewandler`) are banned at the surface of this
+# repository. The only remaining exemption is the b10x-bot GitHub App machinery:
+# scripts/as-bot.sh, scripts/bot-token.sh and scripts/check-bot-files.py carry the
+# App's own name and its B10X_BOT_* env vars, functional identifiers that can only
+# be renamed together with the GitHub App itself.
+# The wire-visible audience vocabulary is no longer exempt: the audience URNs and
+# the audience request header moved to `urn:b10x:*` and `x-b10x-audience`, which
+# invalidated every session minted under the old names. That was deliberate, so
+# there is nothing left here to exempt -- do not re-add an allowance for them.
+# Provenance URLs into the old monorepo and the extraction-provenance phrase are
+# gone too: do not re-add exemptions for those either.
 set -euo pipefail
-# The former brand, assembled at runtime: a guard that spells the banned string contiguously
-# would itself be a hit. `printf` keeps the pattern out of the file while the check still works.
+# The former brand, assembled at runtime: a guard that spells the banned string
+# contiguously would itself be a hit. `printf` keeps the pattern out of the file
+# while the check still works.
 BANNED="$(printf 'daemon%sloom|codewandler' '')"
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
-hits=$(git grep -inE '${BANNED}' -- \
+# `git grep` exits 1 for "no matches" and greater than 1 for a real failure.
+# Collapsing both into `|| true` -- and quoting the pattern so the shell never
+# expanded it -- is how a broken check reported this repository clean.
+set +e
+hits=$(git grep -inE "${BANNED}" -- \
   ':!scripts/check-brand.sh' \
-  ':!scripts/as-bot.sh' ':!scripts/bot-token.sh' ':!scripts/check-bot-files.py' \
-  | awk '{
-      probe = tolower($0)
-      gsub(/urn:b10x:[a-z0-9*-]+/, "", probe)
-      gsub(/x-b10x-audience/, "", probe)
-      if (probe ~ /${BANNED}/) print
-    }' || true)
+  ':!scripts/as-bot.sh' ':!scripts/bot-token.sh' ':!scripts/check-bot-files.py')
+status=$?
+set -e
+if test "$status" -gt 1; then
+  printf 'brand check: git grep failed with exit %s\n' "$status" >&2
+  exit 1
+fi
 if test -n "$hits"; then
-  printf 'brand check: former brand name at the surface:\n%s\n' "$hits" >&2
+  printf 'brand check: the former brand at the surface:\n%s\n' "$hits" >&2
   exit 1
 fi
 printf 'brand check: clean\n'

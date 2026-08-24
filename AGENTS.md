@@ -63,11 +63,13 @@ its own evidence.
 - **Wire-visible token audiences are frozen until the M2 audience registry lands.** The
   `urn:b10x:*` audience URNs and the `x-b10x-audience` request header are minted into
   issued tokens and required **verbatim by every relying party** (`src/lib.rs:77-79`, `:1877`,
-  `:2010`, `:3384`). They are exempt from the brand rule for exactly that reason (atlas ADR 0001
-  § *Wire-visible identifiers*). Renaming one is a **coordinated migration with an ADR in atlas**,
-  done by cutting a new audience vocabulary — never by rewriting the current one. Until M2 turns the
-  hardcoded downstream into a configured registry entry, do not touch these strings, and do not add
-  an exemption to `scripts/check-brand.sh` to make a new one possible.
+  `:2010`, `:3384`). They were moved off the former brand in one deliberate cut, which invalidated
+  every session then live; they carry no banned token now, so nothing about them is exempt from
+  `scripts/check-brand.sh` any more. Renaming one again is a **coordinated migration with an ADR in
+  atlas** (atlas ADR 0001 § *Wire-visible identifiers*), done by cutting a new audience vocabulary —
+  never by rewriting the current one. Until M2 turns the hardcoded downstream into a configured
+  registry entry, do not touch these strings, and do not add an exemption to
+  `scripts/check-brand.sh` to make a new one possible.
   **M2 comes before any new identity feature.**
 - **Credential storage is verifier-only (invariant 2).** A change that persists, logs, traces or
   returns a token value — including in an error path or a debug impl — is a breach, not a
