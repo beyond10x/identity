@@ -3,8 +3,8 @@ FROM rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96c
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=b10x-cargo-git,target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=b10x-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=identity-target,target=/src/target,sharing=locked \
     find Cargo.toml Cargo.lock src -type f -exec touch {} + && \
     cargo build --locked --release && \
