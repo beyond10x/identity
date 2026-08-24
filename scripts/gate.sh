@@ -19,8 +19,6 @@ printf 'gate: bash scripts/check-local-login-refused.sh\n'
 bash scripts/check-local-login-refused.sh
 printf 'gate: bash scripts/check-audit.sh\n'
 bash scripts/check-audit.sh
-printf 'gate: bash scripts/check-brand.sh\n'
-bash scripts/check-brand.sh
 printf 'gate: bash scripts/check-secrets.sh\n'
 bash scripts/check-secrets.sh
 printf 'gate: green\n'

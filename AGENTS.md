@@ -65,11 +65,11 @@ its own evidence.
   issued tokens and required **verbatim by every relying party** (`src/lib.rs:77-79`, `:1877`,
   `:2010`, `:3384`). They were moved off the former brand in one deliberate cut, which invalidated
   every session then live; they carry no banned token now, so nothing about them is exempt from
-  `scripts/check-brand.sh` any more. Renaming one again is a **coordinated migration with an ADR in
+  a per-repo fence any more. Renaming one again is a **coordinated migration with an ADR in
   atlas** (atlas ADR 0001 § *Wire-visible identifiers*), done by cutting a new audience vocabulary —
   never by rewriting the current one. Until M2 turns the hardcoded downstream into a configured
   registry entry, do not touch these strings, and do not add an exemption to
-  `scripts/check-brand.sh` to make a new one possible.
+  atlas' org-wide fence to make a new one possible.
   **M2 comes before any new identity feature.**
 - **Credential storage is verifier-only (invariant 2).** A change that persists, logs, traces or
   returns a token value — including in an error path or a debug impl — is a breach, not a
@@ -114,7 +114,6 @@ cargo clippy --workspace --all-targets --locked --features local-login -- -D war
 cargo fmt --all --check
 bash scripts/check-local-login-refused.sh
 bash scripts/check-audit.sh
-bash scripts/check-brand.sh
 bash scripts/check-secrets.sh
 ```
 
