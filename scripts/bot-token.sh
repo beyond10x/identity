@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Mint one short-lived GitHub App installation token for daemonloom-bot.
+# Mint one short-lived GitHub App installation token for b10x-bot.
 set -euo pipefail
 
-config_root="${XDG_CONFIG_HOME:-${HOME}/.config}/daemonloom"
-config="${DAEMONLOOM_BOT_CONFIG:-${config_root}/daemonloom-bot.json}"
-key="${DAEMONLOOM_BOT_KEY:-${config_root}/daemonloom-bot.private-key.pem}"
-org="${DAEMONLOOM_BOT_ORG:-beyond10x}"
+config_root="${XDG_CONFIG_HOME:-${HOME}/.config}/b10x"
+config="${B10X_BOT_CONFIG:-${config_root}/b10x-bot.json}"
+key="${B10X_BOT_KEY:-${config_root}/b10x-bot.private-key.pem}"
+org="${B10X_BOT_ORG:-beyond10x}"
 
 script_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 python3 "${script_root}/check-bot-files.py" "$config" "$key"
 
-app_id="${DAEMONLOOM_BOT_APP_ID:-$(jq -er '.app_id' "$config")}"
+app_id="${B10X_BOT_APP_ID:-$(jq -er '.app_id' "$config")}"
 
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 

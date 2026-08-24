@@ -44,12 +44,12 @@ use crate::{
 
 /// The audience of the person's own control surface: inspection, consent, confirmation,
 /// correction, revocation, and forgetting.
-pub(crate) const PROFILE_AUDIENCE: &str = "urn:daemonloom:profile";
+pub(crate) const PROFILE_AUDIENCE: &str = "urn:b10x:profile";
 
 /// The audience of a learning consumer such as an agent harness. It reaches the immutable
 /// projection and the learning write, and nothing else: the durable store, the withheld
 /// statements, and the lifecycle controls are not addressable under it.
-pub(crate) const PROFILE_PROJECTION_AUDIENCE: &str = "urn:daemonloom:profile-projection";
+pub(crate) const PROFILE_PROJECTION_AUDIENCE: &str = "urn:b10x:profile-projection";
 
 /// Audiences admitted to the person's durable profile and its lifecycle controls.
 const PERSON_CONTROL_AUDIENCES: [&str; 1] = [PROFILE_AUDIENCE];

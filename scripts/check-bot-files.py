@@ -17,15 +17,15 @@ def inspect(path: str, *, private: bool) -> None:
     try:
         metadata = os.lstat(path)
     except OSError:
-        refuse("daemonloom-bot credential input is unavailable")
+        refuse("b10x-bot credential input is unavailable")
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
-        refuse("daemonloom-bot credential input must be a current-user-owned regular file")
+        refuse("b10x-bot credential input must be a current-user-owned regular file")
     unsafe_mask = 0o077 if private else 0o022
     if stat.S_IMODE(metadata.st_mode) & unsafe_mask:
         qualifier = "owner-only" if private else "not group/world-writable"
-        refuse(f"daemonloom-bot credential input must be {qualifier}")
+        refuse(f"b10x-bot credential input must be {qualifier}")
     if not os.access(path, os.R_OK):
-        refuse("daemonloom-bot credential input is not readable")
+        refuse("b10x-bot credential input is not readable")
 
 
 def main() -> None:

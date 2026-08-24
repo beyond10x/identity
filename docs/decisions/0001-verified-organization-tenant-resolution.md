@@ -22,4 +22,4 @@ profile record. Synthetic tests configure two mappings and prove that two organi
 distinct tenant/subject identities.
 
 This implements the Identity part of
-[Architecture ADR 0041](https://github.com/daemonloom/daemonloom/blob/a7c400179d398c3b884da5f6b386db0c8c5dc462/architecture/adr/0041-hosted-domain-modules-require-connector-signed-request-authority.md).
+`architecture/adr/0041-hosted-domain-modules-require-connector-signed-request-authority.md`.

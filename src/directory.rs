@@ -41,7 +41,7 @@ use crate::{
 };
 
 /// The exact audience an in-cluster directory consumer must present.
-pub(crate) const DIRECTORY_AUDIENCE: &str = "urn:daemonloom:directory";
+pub(crate) const DIRECTORY_AUDIENCE: &str = "urn:b10x:directory";
 
 /// The deployment-configured static group that admits directory administration. Directory writes
 /// reuse the existing static-group mechanism rather than introducing a second credential kind.

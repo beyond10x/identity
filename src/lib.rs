@@ -74,9 +74,9 @@ const MAX_SESSIONS: i64 = 100_000;
 const MAX_ACCESS_TOKENS: i64 = 100_000;
 const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
 const POSTGRES_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const CONNECTORS_AUDIENCE: &str = "urn:daemonloom:connectors";
-const STATUS_AUDIENCE: &str = "urn:daemonloom:status";
-const ZWIRN_AUDIENCE: &str = "urn:daemonloom:zwirn";
+const CONNECTORS_AUDIENCE: &str = "urn:b10x:connectors";
+const STATUS_AUDIENCE: &str = "urn:b10x:status";
+const ZWIRN_AUDIENCE: &str = "urn:b10x:zwirn";
 const CONNECTORS_SCOPES: [&str; 11] = [
     "connectors.audit.read",
     "connectors.catalog.read",
@@ -1874,7 +1874,7 @@ async fn admitted_session_for_audiences(
 
 fn audience_matches(headers: &HeaderMap, audience: &str) -> bool {
     headers
-        .get("x-daemonloom-audience")
+        .get("x-b10x-audience")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value == audience)
 }
@@ -2007,7 +2007,7 @@ async fn verify_access_token(
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
     let audience = headers
-        .get("x-daemonloom-audience")
+        .get("x-b10x-audience")
         .and_then(|value| value.to_str().ok())
         .filter(|value| *value == CONNECTORS_AUDIENCE)
         .ok_or_else(|| HttpError::denied("an exact admitted audience is required"))?;
@@ -3288,7 +3288,7 @@ mod tests {
         assert_eq!(resolved, authority);
         assert!(
             store
-                .resolve_access_token(&credential, "urn:daemonloom:substrate")
+                .resolve_access_token(&credential, "urn:b10x:substrate")
                 .await
                 .unwrap()
                 .is_none()
@@ -3381,14 +3381,14 @@ mod tests {
         let mut headers = HeaderMap::new();
         assert!(!audience_matches(&headers, directory::DIRECTORY_AUDIENCE));
         headers.insert(
-            "x-daemonloom-audience",
+            "x-b10x-audience",
             directory::DIRECTORY_AUDIENCE.parse().unwrap(),
         );
         assert!(audience_matches(&headers, directory::DIRECTORY_AUDIENCE));
         for wrong in [
             STATUS_AUDIENCE,
             profile::PROFILE_AUDIENCE,
-            "urn:daemonloom:directory ",
+            "urn:b10x:directory ",
         ] {
             assert!(
                 !audience_matches(&headers, wrong),
