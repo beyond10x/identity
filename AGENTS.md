@@ -8,6 +8,17 @@ and are not restated here.
 `README.md` describes the login flow, the storage postures and the configuration surface. This file
 says what must not break.
 
+## Serves
+
+The objectives of the collection this repository moves, by id from `atlas/ROADMAP.md` — the only
+cross-repository roadmap, and the page that says what each id means and which evidence closes it:
+
+- **O1 — governed reach.** Who is acting, for which tenant, with which audience — decided before any grant is consulted.
+- **O4 — products run on the foundation.** The predecessor's phase 8, identity delivery against released seams, is carried here.
+
+A change here that moves none of these is a question for the operator, not a task.
+`atlas/scripts/check-map.sh` fails a repository whose `AGENTS.md` names no objective.
+
 ## What this repository owns
 
 Tenant-scoped principal identity: upstream OpenID Connect login, opaque CLI sessions, the
