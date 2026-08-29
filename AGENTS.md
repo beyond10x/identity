@@ -146,6 +146,7 @@ repository has no `CHANGELOG.md`; if one is added, its heading is the version th
 
 | What | Where |
 |---|---|
+| Agreed and proposed work | `.engineering/planning/` — the governed store; every mutation goes through `protocol artifact`, never an editor |
 | Accepted component decisions | `docs/decisions/` |
 | The next milestone that blocks everything else | M2, the audience registry — see the safety envelope |
 | The deployed behaviour a client depends on | `README.md` |

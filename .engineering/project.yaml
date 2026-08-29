@@ -1,0 +1,13 @@
+version: aep.project/1
+
+# Written by `protocol reverse init`. It points; it does not duplicate — a rule restated
+# here would be a second copy with no way to say which one is in force. Principles and
+# profiles of this project's own go under `principles/` and `profiles/` beside this file.
+protocol: adp/1
+profile: development.standard
+protocols: git+ssh://git@github.com/beyond10x/engineering-protocols.git#05109f40c6a7f712f890362b6708b3b7db720b3f
+
+summary: >-
+  The platform login and principal service: upstream OIDC login, tenant-scoped principal identity,
+  opaque audience-scoped access tokens resolved by callback, the server-side credential store and
+  the organization directory.
