@@ -5,7 +5,7 @@ kind: story
 status: draft
 title: Sign a delegated-context assertion substrate can verify offline
 summary: Substrate ADR 0011 needs an EdDSA-signed, audience-scoped assertion; identity holds no signing key and admits one audience.
-revision: 2
+revision: 3
 ---
 ## Why
 
@@ -28,11 +28,11 @@ configuration. Connectors already issues Ed25519 compact JWS. Identity does not.
 
 | Fact | Evidence |
 |---|---|
-| The access token is an opaque random string; the claim set is stored server-side and returned by callback | `src/lib.rs:1938-1941` mints `dl_access_v1_<32 random>`; `put_access_token` at `src/lib.rs:1172` |
+| The access token is an opaque random string; the claim set is stored server-side and returned by callback | `src/lib.rs:1938-1941` mints `identity_access_v1_<32 random>`; `put_access_token` at `src/lib.rs:1172` |
 | Nothing in this service signs anything | no signing key, `SigningKey`, Ed25519 or JWT-encode call in `src/`; `rsa 0.9` is used only to *verify* upstream public JWKs (`README.md:68`) |
 | There is no `kid`, no JWKS endpoint of our own, no key rotation story | same |
 | Exactly one audience is admitted, hardcoded | `src/lib.rs:77` `CONNECTORS_AUDIENCE = "urn:b10x:connectors"`; `issue_access_token` refuses any other at `src/lib.rs:1920-1922` |
-| The claim shape already overlaps what ADR 0011 wants | `AccessAuthority` at `src/lib.rs:1658` already carries `iss`, `sub`, `aud`, `iat`/`nbf`/`exp`, `jti`, `act.sub`, `scope`, `dl_tenant` |
+| The claim shape already overlaps what ADR 0011 wants | `AccessAuthority` at `src/lib.rs:1658` already carries `iss`, `sub`, `aud`, `iat`/`nbf`/`exp`, `jti`, `act.sub`, `scope`, `tenant_id` |
 | The lifetime already matches | `ACCESS_TOKEN_LIFETIME_SECONDS = 5 * 60` (`src/lib.rs:70`); ADR 0011 caps at 300 s |
 | Identity holds no grant | ADR 0011 § Context: connectors owns the grant and carries the grant reference and grant-set revision on every decision |
 

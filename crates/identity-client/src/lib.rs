@@ -233,7 +233,7 @@ impl IdentityClient {
         let response = self
             .http
             .post(self.endpoint("oauth/token")?)
-            .json(&CodeExchangeRequest {
+            .form(&CodeExchangeRequest {
                 grant_type: "authorization_code",
                 client_id,
                 code,
@@ -424,7 +424,16 @@ mod tests {
         response
     }
 
-    async fn token(axum::Json(request): axum::Json<serde_json::Value>) -> Response {
+    async fn token(
+        headers: HeaderMap,
+        axum::Form(request): axum::Form<std::collections::HashMap<String, String>>,
+    ) -> Response {
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static(
+                "application/x-www-form-urlencoded",
+            ))
+        );
         assert_eq!(request["grant_type"], "authorization_code");
         assert_eq!(request["client_id"], "devcenter-web");
         let mut response = axum::Json(json!({
