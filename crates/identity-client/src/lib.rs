@@ -245,7 +245,7 @@ impl IdentityClient {
             .map_err(ClientError::Transport)?;
         require_confidential(&response)?;
         let response: SessionExchangeResponse = decode_status(response).await?;
-        if response.session_type != "Bearer"
+        if response.session_type != "opaque_server_session"
             || response.expires_in <= 0
             || response.session.is_empty()
         {
@@ -424,6 +424,27 @@ mod tests {
         response
     }
 
+    async fn token(axum::Json(request): axum::Json<serde_json::Value>) -> Response {
+        assert_eq!(request["grant_type"], "authorization_code");
+        assert_eq!(request["client_id"], "devcenter-web");
+        let mut response = axum::Json(json!({
+            "session":"identity_session_v1_synthetic",
+            "session_type":"opaque_server_session",
+            "expires_in":3600,
+            "tenant_id":"tenant-1",
+            "subject":"subject-1",
+            "email":"person@example.test"
+        }))
+        .into_response();
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+            .headers_mut()
+            .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+        response
+    }
+
     async fn test_origin() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -432,7 +453,8 @@ mod tests {
                 listener,
                 Router::new()
                     .route("/v1/session-authority", get(authority))
-                    .route("/v1/access-token", post(access)),
+                    .route("/v1/access-token", post(access))
+                    .route("/oauth/token", post(token)),
             )
             .await
             .unwrap();
@@ -469,6 +491,26 @@ mod tests {
         assert_eq!(
             format!("{:?}", access.credential),
             "AccessCredential([REDACTED])"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_code_exchange_accepts_the_servers_opaque_session_type() {
+        let client = IdentityClient::new(&test_origin().await, "urn:b10x:devcenter").unwrap();
+        let exchange = client
+            .exchange_code(
+                "devcenter-web",
+                "synthetic-code",
+                "https://devcenter.example.test/auth/sso/callback",
+                "synthetic-verifier-with-the-required-length-1234567890",
+            )
+            .await
+            .unwrap();
+        assert_eq!(exchange.tenant_id, "tenant-1");
+        assert_eq!(exchange.subject, "subject-1");
+        assert_eq!(
+            exchange.credential.expose_at_cookie_boundary(),
+            "identity_session_v1_synthetic"
         );
     }
 
