@@ -15,8 +15,8 @@ request hints, suffix matching, and `IDENTITY_TENANT_ID` are not fallbacks when 
 enabled. The legacy base-domain allowlist is mutually exclusive and retained only for compatible
 single-tenant deployments.
 
-The Babelforce developer profile deliberately contains one mapping because the deployment is one
-organization, not SaaS. Identity storage and authority envelopes nevertheless retain the resolved
+The hosted developer profile deliberately contains one mapping because that deployment represents
+one organization, not SaaS. Identity storage and authority envelopes nevertheless retain the resolved
 tenant per authorization code, session, access authority, directory record, group assignment, and
 profile record. Synthetic tests configure two mappings and prove that two organizations resolve to
 distinct tenant/subject identities.
