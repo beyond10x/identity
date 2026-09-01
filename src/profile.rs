@@ -1502,8 +1502,8 @@ mod tests {
         // The consent scope is not a Connector scope and grants no audience.
         assert_eq!(super::LEARNING_CONSENT_SCOPE, "profile.learning");
         assert!(!crate::CONNECTORS_SCOPES.contains(&super::LEARNING_CONSENT_SCOPE));
-        assert_ne!(super::PROFILE_AUDIENCE, crate::CONNECTORS_AUDIENCE);
-        assert_ne!(super::PROFILE_AUDIENCE, crate::STATUS_AUDIENCE);
+        assert_ne!(super::PROFILE_AUDIENCE, crate::TEST_CONNECTORS_AUDIENCE);
+        assert_ne!(super::PROFILE_AUDIENCE, crate::TEST_STATUS_AUDIENCE);
     }
 
     #[test]
@@ -1695,6 +1695,14 @@ mod tests {
             tenant_id: TENANT.to_owned(),
             cli_client_id: "harness-cli".to_owned(),
             web_clients: Vec::new(),
+            audience_registry: crate::AudienceRegistry::new(
+                vec![crate::TEST_STATUS_AUDIENCE.to_owned()],
+                vec![(
+                    crate::TEST_CONNECTORS_AUDIENCE.to_owned(),
+                    crate::AccessAudiencePolicy::Connectors,
+                )],
+            )
+            .unwrap(),
             upstream_issuer: "https://accounts.example.test".to_owned(),
             upstream_client_id: "upstream-client".to_owned(),
             upstream_client_secret: crate::SecretValue::new("not-a-real-secret".to_owned()),

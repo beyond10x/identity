@@ -8,8 +8,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use identity::{
-    AppState, Config, OrganizationDomainPolicy, SecretValue, StaticGroupMemberships, Store,
-    WebClient, discover_upstream, router,
+    AccessAudiencePolicy, AppState, AudienceRegistry, Config, OrganizationDomainPolicy,
+    SecretValue, StaticGroupMemberships, Store, WebClient, discover_upstream, router,
 };
 use serde::Deserialize;
 use tracing::{info, warn};
@@ -95,6 +95,7 @@ fn config_from_environment(insecure: bool) -> Result<Config> {
         cli_client_id: env::var("IDENTITY_CLI_CLIENT_ID")
             .unwrap_or_else(|_| "identity-cli".to_owned()),
         web_clients: web_clients()?,
+        audience_registry: audience_registry()?,
         upstream_issuer: required_issuer("IDENTITY_UPSTREAM_ISSUER")?,
         upstream_client_id: required("IDENTITY_UPSTREAM_CLIENT_ID")?,
         upstream_client_secret: required_secret("IDENTITY_UPSTREAM_CLIENT_SECRET")?,
@@ -113,6 +114,87 @@ fn config_from_environment(insecure: bool) -> Result<Config> {
 struct WebClientConfig {
     client_id: String,
     redirect_uri: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AudienceRegistryConfig {
+    version: String,
+    session: Vec<String>,
+    access: Vec<AccessAudienceConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccessAudienceConfig {
+    audience: String,
+    policy: AccessAudiencePolicyConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum AccessAudiencePolicyConfig {
+    Connectors,
+}
+
+fn audience_registry() -> Result<AudienceRegistry> {
+    let source = required("IDENTITY_AUDIENCE_REGISTRY_JSON")?;
+    audience_registry_from_source(&source)
+}
+
+fn audience_registry_from_source(source: &str) -> Result<AudienceRegistry> {
+    let registry: AudienceRegistryConfig = serde_json::from_str(source)
+        .context("IDENTITY_AUDIENCE_REGISTRY_JSON must be a versioned exact audience registry")?;
+    if registry.version != "identity.audiences/1" {
+        bail!("IDENTITY_AUDIENCE_REGISTRY_JSON has an unsupported version");
+    }
+    AudienceRegistry::new(
+        registry.session,
+        registry
+            .access
+            .into_iter()
+            .map(|entry| {
+                let policy = match entry.policy {
+                    AccessAudiencePolicyConfig::Connectors => AccessAudiencePolicy::Connectors,
+                };
+                (entry.audience, policy)
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod audience_registry_tests {
+    use super::*;
+
+    const VALID: &str = r#"{
+      "version":"identity.audiences/1",
+      "session":["urn:b10x:status","urn:b10x:devcenter"],
+      "access":[{"audience":"urn:b10x:connectors","policy":"connectors"}]
+    }"#;
+
+    #[test]
+    fn exact_versioned_registry_is_accepted() {
+        assert!(audience_registry_from_source(VALID).is_ok());
+    }
+
+    #[test]
+    fn unknown_version_field_policy_and_duplicates_are_refused() {
+        for invalid in [
+            VALID.replace("identity.audiences/1", "identity.audiences/2"),
+            VALID.replace("\"access\":", "\"unknown\":[],\"access\":"),
+            VALID.replace("\"connectors\"}", "\"unowned\"}"),
+            VALID.replace(
+                "\"urn:b10x:status\",\"urn:b10x:devcenter\"",
+                "\"urn:b10x:status\",\"urn:b10x:status\"",
+            ),
+        ] {
+            assert!(
+                audience_registry_from_source(&invalid).is_err(),
+                "invalid registry was accepted: {invalid}"
+            );
+        }
+    }
 }
 
 fn web_clients() -> Result<Vec<WebClient>> {

@@ -71,17 +71,17 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 This repository *is* the auth boundary. Every item below needs its own change, its own review and
 its own evidence.
 
-- **Wire-visible token audiences are frozen until the M2 audience registry lands.** The
+- **Wire-visible token audiences are admitted through the M2 registry.** The
   `urn:b10x:*` audience URNs and the `x-b10x-audience` request header are minted into
-  issued tokens and required **verbatim by every relying party** (`src/lib.rs:77-79`, `:1877`,
-  `:2010`, `:3384`). They were moved off the former brand in one deliberate cut, which invalidated
+  issued tokens and required **verbatim by every relying party** (`README.md` § *Audiences*).
+  They were moved off the former brand in one deliberate cut, which invalidated
   every session then live; they carry no banned token now, so nothing about them is exempt from
   a per-repo fence any more. Renaming one again is a **coordinated migration with an ADR in
   atlas** (atlas ADR 0001 § *Wire-visible identifiers*), done by cutting a new audience vocabulary —
-  never by rewriting the current one. Until M2 turns the hardcoded downstream into a configured
-  registry entry, do not touch these strings, and do not add an exemption to
-  atlas' org-wide fence to make a new one possible.
-  **M2 comes before any new identity feature.**
+  never by rewriting the current one. The versioned registry is the only extensible admission
+  path; route-owned directory and profile audiences remain fixed to those routes. A new audience
+  still requires its relying parties to release the same exact byte before deployment configuration
+  admits it.
 - **Credential storage is verifier-only (invariant 2).** A change that persists, logs, traces or
   returns a token value — including in an error path or a debug impl — is a breach, not a
   regression.
@@ -148,7 +148,7 @@ repository has no `CHANGELOG.md`; if one is added, its heading is the version th
 |---|---|
 | Agreed and proposed work | `.engineering/planning/` — the governed store; every mutation goes through `protocol artifact`, never an editor |
 | Accepted component decisions | `docs/decisions/` |
-| The next milestone that blocks everything else | M2, the audience registry — see the safety envelope |
+| The current cross-repository milestone | Devcenter session and provider bootstrap — see the governed planning store |
 | The deployed behaviour a client depends on | `README.md` |
 
 ## Bot identity

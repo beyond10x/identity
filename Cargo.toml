@@ -1,9 +1,13 @@
 [package]
 name = "identity"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 publish = false
+
+[workspace]
+members = ["crates/identity-client"]
+resolver = "2"
 
 [features]
 # A loopback-only development login that mints a session for a typed mailbox with no upstream

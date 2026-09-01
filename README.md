@@ -25,7 +25,7 @@ coarse gate only — it must still run its own admission before an effect-bearin
 
 ## Status
 
-**The first deployable human-login slice, running in the dev cluster.** Version `0.1.0`,
+**The deployable human-login and relying-party authority slice.** Version `0.2.0`,
 `publish = false`, no git tag cut.
 
 | area | state |
@@ -84,6 +84,7 @@ IDENTITY_UPSTREAM_CLIENT_ID='your-client-id' \
 IDENTITY_UPSTREAM_CLIENT_SECRET='your-client-secret' \
 IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM=hd \
 IDENTITY_ORGANIZATION_TENANTS_JSON='[{"claimValue":"example.com","tenantId":"local"}]' \
+IDENTITY_AUDIENCE_REGISTRY_JSON='{"version":"identity.audiences/1","session":["urn:b10x:status"],"access":[{"audience":"urn:b10x:connectors","policy":"connectors"}]}' \
 IDENTITY_DATABASE_PATH=/tmp/identity/private/identity.sqlite3 \
 cargo run --locked
 ```
@@ -135,17 +136,32 @@ refuse it in a deployment, and any one of them is sufficient**:
 ### Audiences
 
 Every authority-bearing call names **exactly one** audience, verbatim. The vocabulary is
-wire-visible — it is minted into issued tokens and required by every relying party — so it still
-carries the former org name and moves only as a protocol change with a migration.
+wire-visible — it is minted into issued tokens and required by every relying party — and moves only
+as a protocol change with a migration. Extensible relying parties are admitted by the required,
+versioned `IDENTITY_AUDIENCE_REGISTRY_JSON`; adding an audience is deployment configuration after
+the relying parties have released the same exact byte.
 
 | audience | reached by |
 |---|---|
-| `urn:b10x:connectors` | a native client, via `POST /v1/access-token`; Connectors resolves it at `GET /v1/access-authority` |
-| `urn:b10x:substrate` | the same path, for substrate |
-| `urn:b10x:status`, `urn:b10x:zwirn` | an in-cluster application, in the `x-b10x-audience` header on `GET /v1/session-authority` |
+| a registered access audience with policy `connectors` | a native client, via `POST /v1/access-token`; Connectors resolves it at `GET /v1/access-authority` |
+| a registered session audience | an in-cluster application, in the `x-b10x-audience` header on `GET /v1/session-authority` |
 | `urn:b10x:directory` | every `/v1/directory/…` route, in `x-b10x-audience` |
 | `urn:b10x:profile` | the person's own control surface |
 | `urn:b10x:profile-projection` | the learning consumer's — it reaches the projection and the learning write, and nothing else: the durable store, the withheld statements and the lifecycle controls are not addressable under it |
+
+The registry document is closed and deterministic:
+
+```json
+{
+  "version": "identity.audiences/1",
+  "session": ["urn:b10x:status", "urn:b10x:devcenter", "urn:b10x:agent-platform"],
+  "access": [{"audience": "urn:b10x:connectors", "policy": "connectors"}]
+}
+```
+
+Unknown versions, fields and policies, duplicate identifiers across either class, malformed
+identifiers, and unregistered request audiences are refused. The canonical registry contributes to
+the session configuration generation, so changing it requires a new login.
 
 The person may see exactly what a consumer is given; a consumer may see nothing else.
 

@@ -74,9 +74,6 @@ const MAX_SESSIONS: i64 = 100_000;
 const MAX_ACCESS_TOKENS: i64 = 100_000;
 const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
 const POSTGRES_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const CONNECTORS_AUDIENCE: &str = "urn:b10x:connectors";
-const STATUS_AUDIENCE: &str = "urn:b10x:status";
-const ZWIRN_AUDIENCE: &str = "urn:b10x:zwirn";
 const CONNECTORS_SCOPES: [&str; 11] = [
     "connectors.audit.read",
     "connectors.catalog.read",
@@ -90,6 +87,13 @@ const CONNECTORS_SCOPES: [&str; 11] = [
     "connectors.integrations.manage",
     "connectors.invoke",
 ];
+
+#[cfg(test)]
+pub(crate) const TEST_CONNECTORS_AUDIENCE: &str = "urn:b10x:connectors";
+#[cfg(test)]
+pub(crate) const TEST_STATUS_AUDIENCE: &str = "urn:b10x:status";
+#[cfg(test)]
+const TEST_ZWIRN_AUDIENCE: &str = "urn:b10x:zwirn";
 
 /// A credential-bearing value whose backing allocation is cleared on drop and whose
 /// diagnostic representation never includes the value.
@@ -131,6 +135,8 @@ pub struct Config {
     pub cli_client_id: String,
     /// Exact browser clients admitted by this Identity deployment.
     pub web_clients: Vec<WebClient>,
+    /// Exact relying-party audiences admitted by this deployment.
+    pub audience_registry: AudienceRegistry,
     pub upstream_issuer: String,
     pub upstream_client_id: String,
     pub upstream_client_secret: SecretValue,
@@ -190,6 +196,7 @@ impl Config {
                 digest.update(field.as_bytes());
             }
         }
+        self.audience_registry.update_generation(&mut digest);
         hex_digest(&digest.finalize()[..])
     }
 }
@@ -245,6 +252,123 @@ impl WebClient {
             redirect_uri,
         })
     }
+}
+
+const AUDIENCE_REGISTRY_VERSION: &str = "identity.audiences/1";
+
+/// The authorization policy attached to an audience-scoped opaque access token.
+///
+/// Policies name server-owned authorization behavior. A deployment can register an audience but
+/// cannot invent a scope vocabulary or make a relying party authoritative for its own grants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AccessAudiencePolicy {
+    /// Connector scopes are admitted through the existing group-aware Connector policy.
+    Connectors,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AccessAudience {
+    audience: String,
+    policy: AccessAudiencePolicy,
+}
+
+impl AccessAudiencePolicy {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Connectors => "connectors",
+        }
+    }
+}
+
+/// Versioned, deployment-owned registry of exact relying-party audiences.
+///
+/// Route-owned audiences such as the directory and profile remain at those routes. This registry
+/// owns the extensible downstream seams: session resolution and short-lived access authorities.
+#[derive(Debug, Clone)]
+pub struct AudienceRegistry {
+    session: BTreeSet<String>,
+    access: BTreeSet<AccessAudience>,
+}
+
+impl AudienceRegistry {
+    /// Builds one exact audience registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed or duplicate audience identifiers, including an identifier
+    /// repeated across the session and access-token classes.
+    pub fn new(session: Vec<String>, access: Vec<(String, AccessAudiencePolicy)>) -> Result<Self> {
+        let mut session_registry = BTreeSet::new();
+        for audience in session {
+            let audience = validate_audience(audience)?;
+            if !session_registry.insert(audience.clone()) {
+                bail!("Identity audience registry repeats audience {audience}");
+            }
+        }
+        let mut access_registry: BTreeSet<AccessAudience> = BTreeSet::new();
+        for (audience, policy) in access {
+            let audience = validate_audience(audience)?;
+            if session_registry.contains(&audience)
+                || access_registry
+                    .iter()
+                    .any(|entry| entry.audience == audience)
+            {
+                bail!("Identity audience registry repeats audience {audience}");
+            }
+            access_registry.insert(AccessAudience { audience, policy });
+        }
+        if session_registry.is_empty() && access_registry.is_empty() {
+            bail!("Identity audience registry cannot be empty");
+        }
+        Ok(Self {
+            session: session_registry,
+            access: access_registry,
+        })
+    }
+
+    fn admits_session(&self, audience: &str) -> bool {
+        self.session.contains(audience)
+    }
+
+    fn access_policy(&self, audience: &str) -> Option<AccessAudiencePolicy> {
+        self.access
+            .iter()
+            .find(|entry| entry.audience == audience)
+            .map(|entry| entry.policy)
+    }
+
+    fn update_generation(&self, digest: &mut Sha256) {
+        update_generation_field(digest, AUDIENCE_REGISTRY_VERSION);
+        for audience in &self.session {
+            update_generation_field(digest, "session");
+            update_generation_field(digest, audience);
+        }
+        for entry in &self.access {
+            update_generation_field(digest, "access");
+            update_generation_field(digest, &entry.audience);
+            update_generation_field(digest, entry.policy.name());
+        }
+    }
+}
+
+fn validate_audience(audience: String) -> Result<String> {
+    if audience.trim() != audience
+        || !(3..=256).contains(&audience.len())
+        || !audience.is_ascii()
+        || audience.bytes().any(|byte| {
+            byte.is_ascii_whitespace() || byte.is_ascii_control() || matches!(byte, b',' | b'"')
+        })
+    {
+        bail!(
+            "Identity audiences must be 3-256 exact printable ASCII characters without whitespace, comma, or quote"
+        );
+    }
+    Ok(audience)
+}
+
+fn update_generation_field(digest: &mut Sha256, field: &str) {
+    digest.update((field.len() as u64).to_be_bytes());
+    digest.update(field.as_bytes());
 }
 
 /// Static deployment configuration that maps verified upstream emails into authorization groups.
@@ -1616,7 +1740,7 @@ struct SessionResponse {
 struct SessionAuthority {
     iss: String,
     sub: String,
-    aud: &'static str,
+    aud: String,
     exp: i64,
     email: Option<String>,
     dl_tenant: String,
@@ -1873,10 +1997,13 @@ async fn admitted_session_for_audiences(
 }
 
 fn audience_matches(headers: &HeaderMap, audience: &str) -> bool {
+    requested_audience(headers).is_some_and(|value| value == audience)
+}
+
+fn requested_audience(headers: &HeaderMap) -> Option<&str> {
     headers
         .get("x-b10x-audience")
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == audience)
 }
 
 async fn liveness() -> &'static str {
@@ -1917,9 +2044,11 @@ async fn issue_access_token(
     headers: HeaderMap,
     Json(request): Json<AccessTokenRequest>,
 ) -> Result<Response, HttpError> {
-    if request.audience != CONNECTORS_AUDIENCE {
-        return Err(HttpError::denied("the requested audience is not admitted"));
-    }
+    let policy = state
+        .config
+        .audience_registry
+        .access_policy(&request.audience)
+        .ok_or_else(|| HttpError::denied("the requested audience is not admitted"))?;
     let credential = bearer(&headers, valid_session_credential)
         .ok_or_else(|| HttpError::denied("a valid Identity session is required"))?;
     let admitted = state
@@ -1932,7 +2061,9 @@ async fn issue_access_token(
         .config
         .static_group_memberships
         .groups_for(&admitted.tenant_id, admitted.email.as_deref());
-    let scope = admitted_connector_scope(&request.scope, &groups)?;
+    let scope = match policy {
+        AccessAudiencePolicy::Connectors => admitted_connector_scope(&request.scope, &groups)?,
+    };
     let now = unix_time().map_err(HttpError::internal)?;
     let credential = format!(
         "dl_access_v1_{}",
@@ -1946,7 +2077,7 @@ async fn issue_access_token(
             .trim_end_matches('/')
             .to_owned(),
         sub: admitted.subject.clone(),
-        aud: CONNECTORS_AUDIENCE.to_owned(),
+        aud: request.audience,
         iat: now,
         nbf: now,
         exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
@@ -1982,9 +2113,8 @@ async fn session_authority(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    let audience = [STATUS_AUDIENCE, ZWIRN_AUDIENCE]
-        .into_iter()
-        .find(|audience| audience_matches(&headers, audience))
+    let audience = requested_audience(&headers)
+        .filter(|audience| state.config.audience_registry.admits_session(audience))
         .ok_or_else(|| HttpError::denied("an exact admitted audience is required"))?;
     let admitted = admitted_session_for_audience(&state, &headers, audience).await?;
     let groups = state
@@ -1994,7 +2124,7 @@ async fn session_authority(
     Ok(confidential_json(SessionAuthority {
         iss: state.config.issuer().to_owned(),
         sub: admitted.subject,
-        aud: audience,
+        aud: audience.to_owned(),
         exp: admitted.expires_at,
         email: admitted.email,
         dl_tenant: admitted.tenant_id,
@@ -2006,10 +2136,14 @@ async fn verify_access_token(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    let audience = headers
-        .get("x-b10x-audience")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| *value == CONNECTORS_AUDIENCE)
+    let audience = requested_audience(&headers)
+        .filter(|audience| {
+            state
+                .config
+                .audience_registry
+                .access_policy(audience)
+                .is_some()
+        })
         .ok_or_else(|| HttpError::denied("an exact admitted audience is required"))?;
     let credential = bearer(&headers, valid_access_credential)
         .ok_or_else(|| HttpError::denied("a valid short-lived access token is required"))?;
@@ -2515,6 +2649,20 @@ fn html_escape(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn audience_registry() -> AudienceRegistry {
+        AudienceRegistry::new(
+            vec![
+                TEST_STATUS_AUDIENCE.to_owned(),
+                TEST_ZWIRN_AUDIENCE.to_owned(),
+            ],
+            vec![(
+                TEST_CONNECTORS_AUDIENCE.to_owned(),
+                AccessAudiencePolicy::Connectors,
+            )],
+        )
+        .unwrap()
+    }
+
     fn config() -> Config {
         Config {
             listen: "127.0.0.1:0".parse().unwrap(),
@@ -2531,6 +2679,7 @@ mod tests {
                 )
                 .unwrap(),
             ],
+            audience_registry: audience_registry(),
             upstream_issuer: "https://accounts.example.test".to_owned(),
             upstream_client_id: "upstream-client".to_owned(),
             upstream_client_secret: SecretValue::new("not-a-real-secret".to_owned()),
@@ -2551,6 +2700,57 @@ mod tests {
         let rendered = format!("{:?}", config());
         assert!(!rendered.contains("not-a-real-secret"));
         assert!(rendered.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn audience_registry_is_exact_disjoint_and_part_of_session_generation() {
+        for malformed in [
+            " urn:b10x:status",
+            "urn:b10x:status ",
+            "urn:b10x:bad audience",
+            "urn:b10x:bad,audience",
+            "",
+        ] {
+            assert!(
+                AudienceRegistry::new(vec![malformed.to_owned()], Vec::new()).is_err(),
+                "malformed audience was accepted: {malformed:?}"
+            );
+        }
+        assert!(
+            AudienceRegistry::new(
+                vec![TEST_STATUS_AUDIENCE.to_owned()],
+                vec![(
+                    TEST_STATUS_AUDIENCE.to_owned(),
+                    AccessAudiencePolicy::Connectors,
+                )],
+            )
+            .is_err()
+        );
+
+        let original = config();
+        let mut changed = config();
+        changed.audience_registry = AudienceRegistry::new(
+            vec![
+                TEST_STATUS_AUDIENCE.to_owned(),
+                "urn:b10x:devcenter".to_owned(),
+            ],
+            vec![(
+                TEST_CONNECTORS_AUDIENCE.to_owned(),
+                AccessAudiencePolicy::Connectors,
+            )],
+        )
+        .unwrap();
+        assert_ne!(
+            original.configuration_generation(),
+            changed.configuration_generation(),
+            "changing admitted audiences must invalidate existing sessions"
+        );
+        assert!(
+            changed
+                .audience_registry
+                .admits_session("urn:b10x:devcenter")
+        );
+        assert!(!changed.audience_registry.admits_session("urn:b10x:other"));
     }
 
     fn authorization_query() -> AuthorizeQuery {
@@ -3193,7 +3393,7 @@ mod tests {
         let authority = AccessAuthority {
             iss: config.issuer().to_owned(),
             sub: identity.subject.clone(),
-            aud: CONNECTORS_AUDIENCE.to_owned(),
+            aud: TEST_CONNECTORS_AUDIENCE.to_owned(),
             iat: now,
             nbf: now,
             exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
@@ -3224,7 +3424,7 @@ mod tests {
         );
         assert!(
             store
-                .resolve_access_token(&access, CONNECTORS_AUDIENCE)
+                .resolve_access_token(&access, TEST_CONNECTORS_AUDIENCE)
                 .await
                 .unwrap()
                 .is_none()
@@ -3251,7 +3451,7 @@ mod tests {
         let authority = AccessAuthority {
             iss: "https://identity.example.test".to_owned(),
             sub: "google-subject".to_owned(),
-            aud: CONNECTORS_AUDIENCE.to_owned(),
+            aud: TEST_CONNECTORS_AUDIENCE.to_owned(),
             iat: now,
             nbf: now,
             exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
@@ -3281,7 +3481,7 @@ mod tests {
             .unwrap();
         assert_eq!(raw_count, 0);
         let resolved = store
-            .resolve_access_token(&credential, CONNECTORS_AUDIENCE)
+            .resolve_access_token(&credential, TEST_CONNECTORS_AUDIENCE)
             .await
             .unwrap()
             .unwrap();
@@ -3365,9 +3565,9 @@ mod tests {
     #[test]
     fn internal_audiences_are_exact_and_disjoint() {
         let audiences = [
-            CONNECTORS_AUDIENCE,
-            STATUS_AUDIENCE,
-            ZWIRN_AUDIENCE,
+            TEST_CONNECTORS_AUDIENCE,
+            TEST_STATUS_AUDIENCE,
+            TEST_ZWIRN_AUDIENCE,
             directory::DIRECTORY_AUDIENCE,
             profile::PROFILE_AUDIENCE,
             profile::PROFILE_PROJECTION_AUDIENCE,
@@ -3386,7 +3586,7 @@ mod tests {
         );
         assert!(audience_matches(&headers, directory::DIRECTORY_AUDIENCE));
         for wrong in [
-            STATUS_AUDIENCE,
+            TEST_STATUS_AUDIENCE,
             profile::PROFILE_AUDIENCE,
             "urn:b10x:directory ",
         ] {
