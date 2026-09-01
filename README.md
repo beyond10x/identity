@@ -230,3 +230,9 @@ These are the reasons the surface looks the way it does. The full statements are
 - [`docs/decisions/0004-agnostic-relying-party-registration.md`](docs/decisions/0004-agnostic-relying-party-registration.md)
   — why downstream audiences and scopes are opaque deployment data rather than compiled policy.
 - [`AGENTS.md`](AGENTS.md) — working agreements, invariants, and the release procedure.
+
+<!-- b10x-docs:start -->
+## Documentation
+
+[Identity documentation](https://beyond10x.github.io/docs/identity/) · [Start](https://beyond10x.github.io/) · [Ecosystem](https://beyond10x.github.io/ecosystem/) · [Impact](https://beyond10x.github.io/changes/) · [Releases](https://beyond10x.github.io/releases/)
+<!-- b10x-docs:end -->
