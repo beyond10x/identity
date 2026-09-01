@@ -2,10 +2,10 @@
 format: aep.planning-md/1
 id: story:delegated-context-signing-key
 kind: story
-status: draft
+status: archived
 title: Sign a delegated-context assertion substrate can verify offline
 summary: Substrate ADR 0011 needs an EdDSA-signed, audience-scoped assertion; identity holds no signing key and admits one audience.
-revision: 3
+revision: 5
 ---
 ## Why
 
@@ -86,3 +86,7 @@ Either:
 Grant evaluation, introspection, or any runtime call from substrate to identity. ADR 0011 forbids all
 three: a verified document annotates or refuses, and never admits an operation substrate's own checks
 declined.
+
+## Decision
+
+Archived. Identity does not compile a downstream execution or grant vocabulary. Any delegated execution assertion is owned by the service that holds and evaluates that grant.

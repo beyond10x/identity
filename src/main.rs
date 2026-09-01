@@ -12,7 +12,7 @@ use identity::{
     SecretValue, StaticGroupMemberships, Store, WebClient, discover_upstream, router,
 };
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
@@ -24,20 +24,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // A posture stated on the command line and nowhere else. An environment variable or a config
-    // field can be set by something a person never reads; an argument is typed deliberately and is
-    // visible in the process list of whatever is running. The gateway states its posture the same
-    // way (`foundation/llmgw/src/main.rs`), and no deployment manifest passes this flag — a test
-    // in this component fails if one ever does.
-    let insecure = env::args().skip(1).any(|argument| argument == "--insecure");
-    let config = Arc::new(config_from_environment(insecure)?);
-    if insecure {
-        warn!(
-            "serving WITH PLAINTEXT endpoints admitted (--insecure): the Connector endpoint this \
-             Identity advertises may be http, so a session it issues can name an endpoint no \
-             transport protects"
-        );
-    }
+    let config = Arc::new(config_from_environment()?);
     // This binary carries the local development login, which signs a person in as any mailbox they
     // type. It refuses to serve anything a second machine could reach, before it binds a listener.
     #[cfg(feature = "local-login")]
@@ -72,7 +59,7 @@ async fn main() -> Result<()> {
         .context("serve identity HTTP")
 }
 
-fn config_from_environment(insecure: bool) -> Result<Config> {
+fn config_from_environment() -> Result<Config> {
     let listen = env::var("IDENTITY_LISTEN")
         .unwrap_or_else(|_| "0.0.0.0:8080".to_owned())
         .parse()
@@ -90,7 +77,6 @@ fn config_from_environment(insecure: bool) -> Result<Config> {
     Ok(Config {
         listen,
         public_origin,
-        connectors_endpoint: optional_connectors_endpoint(insecure)?,
         tenant_id: required("IDENTITY_TENANT_ID")?,
         cli_client_id: env::var("IDENTITY_CLI_CLIENT_ID")
             .unwrap_or_else(|_| "identity-cli".to_owned()),
@@ -128,13 +114,17 @@ struct AudienceRegistryConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AccessAudienceConfig {
     audience: String,
-    policy: AccessAudiencePolicyConfig,
+    #[serde(default)]
+    scopes: Vec<String>,
+    #[serde(default)]
+    group_scopes: Vec<GroupScopeConfig>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum AccessAudiencePolicyConfig {
-    Connectors,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GroupScopeConfig {
+    group: String,
+    scopes: Vec<String>,
 }
 
 fn audience_registry() -> Result<AudienceRegistry> {
@@ -145,7 +135,7 @@ fn audience_registry() -> Result<AudienceRegistry> {
 fn audience_registry_from_source(source: &str) -> Result<AudienceRegistry> {
     let registry: AudienceRegistryConfig = serde_json::from_str(source)
         .context("IDENTITY_AUDIENCE_REGISTRY_JSON must be a versioned exact audience registry")?;
-    if registry.version != "identity.audiences/1" {
+    if registry.version != "identity.audiences/2" {
         bail!("IDENTITY_AUDIENCE_REGISTRY_JSON has an unsupported version");
     }
     AudienceRegistry::new(
@@ -154,12 +144,17 @@ fn audience_registry_from_source(source: &str) -> Result<AudienceRegistry> {
             .access
             .into_iter()
             .map(|entry| {
-                let policy = match entry.policy {
-                    AccessAudiencePolicyConfig::Connectors => AccessAudiencePolicy::Connectors,
-                };
-                (entry.audience, policy)
+                AccessAudiencePolicy::new(
+                    entry.scopes,
+                    entry
+                        .group_scopes
+                        .into_iter()
+                        .map(|rule| (rule.group, rule.scopes))
+                        .collect(),
+                )
+                .map(|policy| (entry.audience, policy))
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
     )
 }
 
@@ -168,9 +163,13 @@ mod audience_registry_tests {
     use super::*;
 
     const VALID: &str = r#"{
-      "version":"identity.audiences/1",
-      "session":["urn:b10x:status","urn:b10x:devcenter"],
-      "access":[{"audience":"urn:b10x:connectors","policy":"connectors"}]
+      "version":"identity.audiences/2",
+      "session":["urn:example:status","urn:example:console"],
+      "access":[{
+        "audience":"urn:example:resource-api",
+        "scopes":["resource.read"],
+        "groupScopes":[{"group":"operator","scopes":["resource.write"]}]
+      }]
     }"#;
 
     #[test]
@@ -181,12 +180,12 @@ mod audience_registry_tests {
     #[test]
     fn unknown_version_field_policy_and_duplicates_are_refused() {
         for invalid in [
-            VALID.replace("identity.audiences/1", "identity.audiences/2"),
+            VALID.replace("identity.audiences/2", "identity.audiences/1"),
             VALID.replace("\"access\":", "\"unknown\":[],\"access\":"),
-            VALID.replace("\"connectors\"}", "\"unowned\"}"),
+            VALID.replace("\"resource.read\"", "\"resource read\""),
             VALID.replace(
-                "\"urn:b10x:status\",\"urn:b10x:devcenter\"",
-                "\"urn:b10x:status\",\"urn:b10x:status\"",
+                "\"urn:example:status\",\"urn:example:console\"",
+                "\"urn:example:status\",\"urn:example:status\"",
             ),
         ] {
             assert!(
@@ -250,37 +249,6 @@ fn static_group_memberships() -> Result<StaticGroupMemberships> {
             .map(|membership| (membership.tenant_id, membership.groups))
             .collect(),
     )
-}
-
-fn optional_connectors_endpoint(insecure: bool) -> Result<Option<Url>> {
-    let Some(value) = env::var("IDENTITY_CONNECTORS_ENDPOINT")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Ok(None);
-    };
-    normalize_connectors_endpoint(&value, insecure).map(Some)
-}
-
-fn normalize_connectors_endpoint(value: &str, insecure: bool) -> Result<Url> {
-    let endpoint =
-        Url::parse(value).context("IDENTITY_CONNECTORS_ENDPOINT must be an absolute HTTPS URL")?;
-    let scheme_admitted = endpoint.scheme() == "https" || (insecure && endpoint.scheme() == "http");
-    if !scheme_admitted
-        || endpoint.host_str().is_none()
-        || !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-        || endpoint.path() == "/"
-        || endpoint.path().contains("//")
-        || endpoint.path().ends_with('/')
-        || endpoint.query().is_some()
-        || endpoint.fragment().is_some()
-    {
-        bail!(
-            "IDENTITY_CONNECTORS_ENDPOINT must be a closed HTTPS API base without credentials, query, fragment, or trailing slash"
-        );
-    }
-    Ok(endpoint)
 }
 
 fn organization_domain_policy() -> Result<OrganizationDomainPolicy> {
@@ -441,7 +409,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::{database_url_from_parts, normalize_connectors_endpoint};
+    use super::database_url_from_parts;
 
     #[test]
     fn database_parts_are_safely_encoded() {
@@ -459,45 +427,5 @@ mod tests {
             url.expose_secret(),
             "postgresql://identity%20user:p%40ss%3A%2F%3F%23%5B%5D!@postgresql.example.test:5432/identity%20database?sslmode=verify-full"
         );
-    }
-
-    #[test]
-    fn connector_discovery_endpoint_is_a_closed_https_base() {
-        assert!(
-            normalize_connectors_endpoint("https://code.example/api/connectors/v1", false).is_ok()
-        );
-        for endpoint in [
-            "http://code.example/api/connectors/v1",
-            "https://user@code.example/api/connectors/v1",
-            "https://code.example/api/connectors/v1/",
-            "https://code.example/api/connectors/v1?next=evil",
-        ] {
-            assert!(normalize_connectors_endpoint(endpoint, false).is_err());
-        }
-    }
-
-    #[test]
-    fn plaintext_is_admitted_only_when_the_posture_was_stated_on_the_command_line() {
-        // Without --insecure a plaintext endpoint is refused, whatever else is true of it.
-        assert!(
-            normalize_connectors_endpoint("http://127.0.0.1:18080/api/connectors/v1", false)
-                .is_err()
-        );
-        // With it, plaintext is admitted — and every other rule still holds, so the flag widens
-        // exactly one thing rather than turning the check off.
-        assert!(
-            normalize_connectors_endpoint("http://127.0.0.1:18080/api/connectors/v1", true).is_ok()
-        );
-        for endpoint in [
-            "http://user@127.0.0.1:18080/api/connectors/v1",
-            "http://127.0.0.1:18080/api/connectors/v1/",
-            "http://127.0.0.1:18080/api/connectors/v1?next=evil",
-            "http://127.0.0.1:18080/",
-        ] {
-            assert!(
-                normalize_connectors_endpoint(endpoint, true).is_err(),
-                "{endpoint}"
-            );
-        }
     }
 }

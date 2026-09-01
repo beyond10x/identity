@@ -91,8 +91,10 @@ its own evidence.
 - **Revocation is total.** `POST /v1/logout` revokes the presented session **and every outstanding
   relying-party access token for that subject**. A partial revocation leaves a live credential
   behind.
-- **`connectors_endpoint` is discovery, not a grant.** It is one closed non-secret HTTPS base
-  published in login metadata. It must never carry, imply or substitute for a credential.
+- **Relying-party registration is opaque.** Identity may validate and bind configured audience and
+  scope bytes, but it contains no downstream endpoint, provider flow, product name, capability
+  vocabulary, or product-specific policy branch. The relying party owns scope meaning and the final
+  authorization decision.
 - **Nothing sensitive enters history.** `scripts/check-secrets.sh` scans the **complete repository
   history** with a checksum-pinned Gitleaks release. Never commit credentials, tokens, customer data
   or database files.
@@ -148,7 +150,7 @@ repository has no `CHANGELOG.md`; if one is added, its heading is the version th
 |---|---|
 | Agreed and proposed work | `.engineering/planning/` — the governed store; every mutation goes through `protocol artifact`, never an editor |
 | Accepted component decisions | `docs/decisions/` |
-| The current cross-repository milestone | Devcenter session and provider bootstrap — see the governed planning store |
+| The current milestone | Agnostic relying-party registration — see the governed planning store |
 | The deployed behaviour a client depends on | `README.md` |
 
 ## Bot identity

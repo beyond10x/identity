@@ -34,7 +34,6 @@ pub struct LoginMetadata {
     pub authorization_endpoint: String,
     pub token_endpoint: String,
     pub access_token_endpoint: String,
-    pub connectors_endpoint: Option<String>,
     pub cli_client_id: String,
     pub response_types_supported: [String; 1],
     pub grant_types_supported: [String; 1],
@@ -380,13 +379,13 @@ mod tests {
     use super::*;
 
     async fn authority(headers: HeaderMap) -> Response {
-        if headers.get(AUDIENCE_HEADER) != Some(&HeaderValue::from_static("urn:b10x:devcenter")) {
+        if headers.get(AUDIENCE_HEADER) != Some(&HeaderValue::from_static("urn:example:console")) {
             return StatusCode::FORBIDDEN.into_response();
         }
         let mut response = axum::Json(json!({
             "iss":"https://identity.example.test",
             "sub":"subject-1",
-            "aud":"urn:b10x:devcenter",
+            "aud":"urn:example:console",
             "exp":4_102_444_800_i64,
             "email":"person@example.test",
             "tenant_id":"tenant-1",
@@ -411,8 +410,8 @@ mod tests {
             "access_token":"synthetic-access",
             "token_type":"Bearer",
             "expires_in":300,
-            "audience":"urn:b10x:connectors",
-            "scope":"connectors.connections.self"
+            "audience":"urn:example:resource-api",
+            "scope":"resource.read"
         }))
         .into_response();
         response
@@ -435,7 +434,7 @@ mod tests {
             ))
         );
         assert_eq!(request["grant_type"], "authorization_code");
-        assert_eq!(request["client_id"], "devcenter-web");
+        assert_eq!(request["client_id"], "console-web");
         let mut response = axum::Json(json!({
             "session":"identity_session_v1_synthetic",
             "session_type":"opaque_server_session",
@@ -473,7 +472,7 @@ mod tests {
 
     #[tokio::test]
     async fn exact_audience_authority_is_decoded_without_the_credential_in_debug() {
-        let client = IdentityClient::new(&test_origin().await, "urn:b10x:devcenter").unwrap();
+        let client = IdentityClient::new(&test_origin().await, "urn:example:console").unwrap();
         let authority = client
             .resolve_session("Bearer synthetic-session-that-is-never-recorded")
             .await
@@ -485,18 +484,18 @@ mod tests {
 
     #[tokio::test]
     async fn short_lived_access_credentials_are_exact_and_redacted() {
-        let client = IdentityClient::new(&test_origin().await, "urn:b10x:devcenter").unwrap();
+        let client = IdentityClient::new(&test_origin().await, "urn:example:console").unwrap();
         let access = client
             .issue_access_token(
                 "Bearer synthetic-session",
-                "urn:b10x:connectors",
-                "connectors.connections.self",
+                "urn:example:resource-api",
+                "resource.read",
             )
             .await
             .unwrap();
         assert_eq!(access.expires_in, 300);
-        assert_eq!(access.audience, "urn:b10x:connectors");
-        assert_eq!(access.scope, "connectors.connections.self");
+        assert_eq!(access.audience, "urn:example:resource-api");
+        assert_eq!(access.scope, "resource.read");
         assert_eq!(
             format!("{:?}", access.credential),
             "AccessCredential([REDACTED])"
@@ -505,12 +504,12 @@ mod tests {
 
     #[tokio::test]
     async fn browser_code_exchange_accepts_the_servers_opaque_session_type() {
-        let client = IdentityClient::new(&test_origin().await, "urn:b10x:devcenter").unwrap();
+        let client = IdentityClient::new(&test_origin().await, "urn:example:console").unwrap();
         let exchange = client
             .exchange_code(
-                "devcenter-web",
+                "console-web",
                 "synthetic-code",
-                "https://devcenter.example.test/auth/sso/callback",
+                "https://console.example.test/auth/sso/callback",
                 "synthetic-verifier-with-the-required-length-1234567890",
             )
             .await

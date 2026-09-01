@@ -1,6 +1,6 @@
 # Decision 0002: relying-party audiences are deployment-registered
 
-Status: accepted, 2026-09-01.
+Status: superseded by decision 0004, 2026-09-01.
 
 ## Context
 

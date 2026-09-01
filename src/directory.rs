@@ -1169,7 +1169,7 @@ mod tests {
         for invalid in ["", "-leading", "9leading", &"a".repeat(65), "with space"] {
             assert!(validated_group_key(invalid).is_err(), "admitted {invalid}");
         }
-        assert!(validated_subject("google|1234").is_ok());
+        assert!(validated_subject("issuer|1234").is_ok());
         for invalid in ["", "with space", &"a".repeat(256)] {
             assert!(validated_subject(invalid).is_err(), "admitted {invalid}");
         }
@@ -1218,7 +1218,7 @@ mod tests {
 
         let session = |email: Option<&str>| AdmittedSession {
             tenant_id: "tenant-dev".to_owned(),
-            subject: "google-subject".to_owned(),
+            subject: "upstream-subject".to_owned(),
             email: email.map(str::to_owned),
             expires_at: 0,
         };
@@ -1239,7 +1239,7 @@ mod tests {
         // The tenant binds too: the same email in another tenant is not an administrator.
         let other_tenant = AdmittedSession {
             tenant_id: "tenant-other".to_owned(),
-            subject: "google-subject".to_owned(),
+            subject: "upstream-subject".to_owned(),
             email: Some("admin@example.test".to_owned()),
             expires_at: 0,
         };

@@ -58,8 +58,8 @@ const PERSON_CONTROL_AUDIENCES: [&str; 1] = [PROFILE_AUDIENCE];
 /// what a worker is given; a worker may not look at anything else.
 const PROJECTION_AUDIENCES: [&str; 2] = [PROFILE_AUDIENCE, PROFILE_PROJECTION_AUDIENCE];
 
-/// The one consent scope this module recognizes. It is deliberately not a Connector scope and not
-/// an audience: it grants no access to anything.
+/// The one consent scope this module recognizes. It is deliberately not a relying-party scope or
+/// audience: it grants no access to anything.
 const LEARNING_CONSENT_SCOPE: &str = "profile.learning";
 
 const STATEMENT_KINDS: [&str; 4] = ["friction", "goal_horizon", "preference", "working_pattern"];
@@ -1311,7 +1311,7 @@ mod tests {
 
     const ISSUER: &str = "https://identity.example.test";
     const TENANT: &str = "tenant-dev";
-    const SUBJECT: &str = "google-subject";
+    const SUBJECT: &str = "upstream-subject";
 
     fn granted_consent() -> ConsentRecord {
         ConsentRecord {
@@ -1499,10 +1499,9 @@ mod tests {
         assert!(!withdrawn.learning_consent);
         assert_eq!(withdrawn.statement_count, 0);
 
-        // The consent scope is not a Connector scope and grants no audience.
+        // The consent scope grants no relying-party audience.
         assert_eq!(super::LEARNING_CONSENT_SCOPE, "profile.learning");
-        assert!(!crate::CONNECTORS_SCOPES.contains(&super::LEARNING_CONSENT_SCOPE));
-        assert_ne!(super::PROFILE_AUDIENCE, crate::TEST_CONNECTORS_AUDIENCE);
+        assert_ne!(super::PROFILE_AUDIENCE, crate::TEST_ACCESS_AUDIENCE);
         assert_ne!(super::PROFILE_AUDIENCE, crate::TEST_STATUS_AUDIENCE);
     }
 
@@ -1695,16 +1694,12 @@ mod tests {
         crate::Config {
             listen: "127.0.0.1:0".parse().unwrap(),
             public_origin: url::Url::parse("https://identity.example.test/").unwrap(),
-            connectors_endpoint: None,
             tenant_id: TENANT.to_owned(),
             cli_client_id: "harness-cli".to_owned(),
             web_clients: Vec::new(),
             audience_registry: crate::AudienceRegistry::new(
                 vec![crate::TEST_STATUS_AUDIENCE.to_owned()],
-                vec![(
-                    crate::TEST_CONNECTORS_AUDIENCE.to_owned(),
-                    crate::AccessAudiencePolicy::Connectors,
-                )],
+                Vec::new(),
             )
             .unwrap(),
             upstream_issuer: "https://accounts.example.test".to_owned(),
@@ -1760,15 +1755,6 @@ mod tests {
             authority_before,
             "granting profile-learning consent must not change an authority group"
         );
-        assert_eq!(
-            crate::bootstrap_connector_scope("connectors.catalog.read").unwrap(),
-            "connectors.catalog.read"
-        );
-        assert!(
-            crate::bootstrap_connector_scope("connectors.invoke").is_err(),
-            "consent must not widen the admitted Connector scope"
-        );
-
         // Revoking learning empties the projection and leaves the session, its groups, and the
         // durable rows exactly as they were.
         let record = statement(

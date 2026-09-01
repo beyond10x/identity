@@ -4,7 +4,7 @@ The platform's login and principal service. It owns upstream OpenID Connect logi
 principal identity, opaque CLI sessions, the server-side credential store, the organization
 directory, and the personal collaboration profile.
 
-The problem it removes: every product service otherwise runs its own Google OAuth, keeps its own
+The problem it removes: every product service otherwise runs its own upstream OAuth, keeps its own
 copy of who works here, and invents its own idea of what a user identifier means. Here, upstream
 provider tokens never leave this process, a user key is always `(tenant, sub)` and never a bare
 subject, and a consumer resolves a short-lived audience-scoped authority instead of holding a
@@ -12,21 +12,18 @@ login session.
 
 ## Where it sits
 
-| direction | what |
-|---|---|
-| authenticates | [connectors](https://github.com/beyond10x/connectors) — issues a five-minute opaque access token, which Connectors resolves through `GET /v1/access-authority` |
-| authenticates | in-cluster applications, through `GET /v1/session-authority` with an exact audience header |
-| will authenticate | [llmgw](https://github.com/beyond10x/llmgw) — its `[identity]` config section exists but that build refuses to start with it |
-| consumes | an upstream OIDC provider (Google in dev), SQLite locally, PostgreSQL in cluster |
-| mapped in | [atlas](https://github.com/beyond10x/atlas) |
+Identity consumes a generically configured upstream OIDC provider and either SQLite or PostgreSQL.
+Relying parties resolve sessions or five-minute opaque access credentials through exact, opaque
+audience registrations. Identity contains no relying-party endpoint, provider integration, product
+name, or capability vocabulary.
 
 Login sessions and upstream provider credentials never reach a consumer. A consumer's scope is a
 coarse gate only — it must still run its own admission before an effect-bearing operation.
 
 ## Status
 
-**The deployable human-login and relying-party authority slice.** Version `0.2.1`,
-`publish = false`, no git tag cut.
+**The deployable human-login and relying-party authority slice.** The workspace is private and not
+published to crates.io.
 
 | area | state |
 |---|---|
@@ -72,26 +69,25 @@ upstream dependency stops carrying that crate.
 
 ### Running it locally
 
-Create a Google OAuth web client whose authorized redirect URI is exactly
+Create an upstream OIDC web client whose authorized redirect URI is exactly
 `http://127.0.0.1:8080/oauth/callback/upstream`, then:
 
 ```bash
 IDENTITY_LISTEN=127.0.0.1:8080 \
 IDENTITY_PUBLIC_ORIGIN=http://127.0.0.1:8080 \
 IDENTITY_TENANT_ID=local \
-IDENTITY_UPSTREAM_ISSUER=https://accounts.google.com \
+IDENTITY_UPSTREAM_ISSUER=https://accounts.example.com \
 IDENTITY_UPSTREAM_CLIENT_ID='your-client-id' \
 IDENTITY_UPSTREAM_CLIENT_SECRET='your-client-secret' \
-IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM=hd \
+IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM=organization \
 IDENTITY_ORGANIZATION_TENANTS_JSON='[{"claimValue":"example.com","tenantId":"local"}]' \
-IDENTITY_AUDIENCE_REGISTRY_JSON='{"version":"identity.audiences/1","session":["urn:b10x:status"],"access":[{"audience":"urn:b10x:connectors","policy":"connectors"}]}' \
+IDENTITY_AUDIENCE_REGISTRY_JSON='{"version":"identity.audiences/2","session":["urn:example:console"],"access":[{"audience":"urn:example:resource-api","scopes":["resource.read"],"groupScopes":[{"group":"operator","scopes":["resource.write"]}]}]}' \
 IDENTITY_DATABASE_PATH=/tmp/identity/private/identity.sqlite3 \
 cargo run --locked
 ```
 
-`IDENTITY_CONNECTORS_ENDPOINT` is optional standalone and required when native clients should
-discover a trusted hosted Connector API. Production configuration refuses a non-HTTPS public
-origin; plain HTTP is accepted only for the literal `127.0.0.1` local-test origin.
+Production configuration refuses a non-HTTPS public origin; plain HTTP is accepted only for the
+literal `127.0.0.1` local-test origin.
 
 ### Signing in on a workstation
 
@@ -125,7 +121,7 @@ refuse it in a deployment, and any one of them is sufficient**:
 |---|---|
 | `GET /livez` | process liveness only |
 | `GET /readyz`, `GET /healthz` | executes a database query; `503` when durable state is unavailable |
-| `GET /.well-known/identity-cli-login` | login metadata, including the one closed `connectors_endpoint` |
+| `GET /.well-known/identity-cli-login` | Identity-only login and access-token endpoint metadata |
 | `GET /oauth/authorize`, `GET /oauth/callback/upstream`, `POST /oauth/token` | the browser leg and the one-use code exchange |
 | `GET /v1/session-authority` | an allowlisted in-cluster caller resolves the current session |
 | `POST /v1/access-token`, `GET /v1/access-authority` | mint and resolve a five-minute audience-scoped access token |
@@ -143,7 +139,7 @@ the relying parties have released the same exact byte.
 
 | audience | reached by |
 |---|---|
-| a registered access audience with policy `connectors` | a native client, via `POST /v1/access-token`; Connectors resolves it at `GET /v1/access-authority` |
+| a registered access audience | an authenticated client, via `POST /v1/access-token`; the exact relying party resolves it at `GET /v1/access-authority` |
 | a registered session audience | an in-cluster application, in the `x-b10x-audience` header on `GET /v1/session-authority` |
 | `urn:b10x:directory` | every `/v1/directory/…` route, in `x-b10x-audience` |
 | `urn:b10x:profile` | the person's own control surface |
@@ -153,15 +149,23 @@ The registry document is closed and deterministic:
 
 ```json
 {
-  "version": "identity.audiences/1",
-  "session": ["urn:b10x:status", "urn:b10x:devcenter", "urn:b10x:agent-platform"],
-  "access": [{"audience": "urn:b10x:connectors", "policy": "connectors"}]
+  "version": "identity.audiences/2",
+  "session": ["urn:example:console"],
+  "access": [{
+    "audience": "urn:example:resource-api",
+    "scopes": ["resource.read"],
+    "groupScopes": [{"group": "operator", "scopes": ["resource.write"]}]
+  }]
 }
 ```
 
-Unknown versions, fields and policies, duplicate identifiers across either class, malformed
-identifiers, and unregistered request audiences are refused. The canonical registry contributes to
-the session configuration generation, so changing it requires a new login.
+Audience and scope bytes are opaque registration data. `scopes` are available to every
+authenticated subject; an exact `groupScopes` entry can expand issuance for subjects carrying that
+verified group. Identity only enforces the closed registration. The relying party owns the meaning
+of those bytes and every operation-level authorization decision. Unknown versions and fields,
+duplicate identifiers or rules, malformed names, unregistered audiences and unregistered scopes are
+refused. The canonical registry contributes to the session configuration generation, so changing it
+requires a new login.
 
 The person may see exactly what a consumer is given; a consumer may see nothing else.
 
@@ -223,4 +227,6 @@ These are the reasons the surface looks the way it does. The full statements are
   — why tenant comes from a verified claim and nothing else.
 - [`docs/decisions/0003-product-neutral-wire-vocabulary.md`](docs/decisions/0003-product-neutral-wire-vocabulary.md)
   — why credentials and resolved authority fields use Identity-owned names.
+- [`docs/decisions/0004-agnostic-relying-party-registration.md`](docs/decisions/0004-agnostic-relying-party-registration.md)
+  — why downstream audiences and scopes are opaque deployment data rather than compiled policy.
 - [`AGENTS.md`](AGENTS.md) — working agreements, invariants, and the release procedure.

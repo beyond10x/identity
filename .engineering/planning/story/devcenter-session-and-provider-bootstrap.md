@@ -2,10 +2,10 @@
 format: aep.planning-md/1
 id: story:devcenter-session-and-provider-bootstrap
 kind: story
-status: draft
+status: archived
 title: Issue Devcenter sessions without treating provider credentials as identity
 summary: After M2, register Devcenter as a relying party and define a fail-closed provider-bootstrap handoff that ends in an Identity session.
-revision: 1
+revision: 3
 ---
 ## Outcome
 
@@ -52,3 +52,7 @@ Devcenter respectively.
 
 M2 audience registry and a reviewed cross-service bootstrap contract. No implementation starts by
 minting a Devcenter audience directly in the current hardcoded vocabulary.
+
+## Decision
+
+Archived. Provider connection choreography belongs to the product shell and credential-custody service. Identity exposes only generic OIDC login, opaque sessions, and opaque relying-party registration.

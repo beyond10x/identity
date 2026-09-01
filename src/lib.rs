@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{self, Write as _};
 use std::net::SocketAddr;
 #[cfg(unix)]
@@ -74,23 +74,8 @@ const MAX_SESSIONS: i64 = 100_000;
 const MAX_ACCESS_TOKENS: i64 = 100_000;
 const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
 const POSTGRES_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const CONNECTORS_SCOPES: [&str; 12] = [
-    "connectors.audit.read",
-    "connectors.catalog.read",
-    "connectors.channels.manage",
-    "connectors.connections.manage",
-    "connectors.connections.self",
-    "connectors.credentials.lease",
-    "connectors.deliveries.manage",
-    "connectors.events.read",
-    "connectors.events.self",
-    "connectors.grants.manage",
-    "connectors.integrations.manage",
-    "connectors.invoke",
-];
-
 #[cfg(test)]
-pub(crate) const TEST_CONNECTORS_AUDIENCE: &str = "urn:b10x:connectors";
+pub(crate) const TEST_ACCESS_AUDIENCE: &str = "urn:example:resource-api";
 #[cfg(test)]
 pub(crate) const TEST_STATUS_AUDIENCE: &str = "urn:b10x:status";
 #[cfg(test)]
@@ -130,8 +115,6 @@ impl fmt::Debug for SecretValue {
 pub struct Config {
     pub listen: SocketAddr,
     pub public_origin: Url,
-    /// Trusted hosted Connector API base published to native clients after Identity discovery.
-    pub connectors_endpoint: Option<Url>,
     pub tenant_id: String,
     pub cli_client_id: String,
     /// Exact browser clients admitted by this Identity deployment.
@@ -164,9 +147,6 @@ impl Config {
             &self.tenant_id,
             &self.cli_client_id,
             &self.upstream_issuer,
-            self.connectors_endpoint
-                .as_ref()
-                .map_or("", url::Url::as_str),
             self.organization_domain_policy
                 .claim
                 .as_deref()
@@ -255,16 +235,17 @@ impl WebClient {
     }
 }
 
-const AUDIENCE_REGISTRY_VERSION: &str = "identity.audiences/1";
+const AUDIENCE_REGISTRY_VERSION: &str = "identity.audiences/2";
 
-/// The authorization policy attached to an audience-scoped opaque access token.
+/// Generic deployment-owned issuance constraints for one opaque relying-party audience.
 ///
-/// Policies name server-owned authorization behavior. A deployment can register an audience but
-/// cannot invent a scope vocabulary or make a relying party authoritative for its own grants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum AccessAudiencePolicy {
-    /// Connector scopes are admitted through the existing group-aware Connector policy.
-    Connectors,
+/// Scope bytes are opaque to Identity. The base set is available to every authenticated subject;
+/// exact group rules may expand it. The relying party remains responsible for interpreting each
+/// scope and making the final authorization decision.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AccessAudiencePolicy {
+    base_scopes: BTreeSet<String>,
+    group_scopes: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -274,9 +255,68 @@ struct AccessAudience {
 }
 
 impl AccessAudiencePolicy {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Connectors => "connectors",
+    /// Builds one generic exact-scope policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed, duplicated, empty, or ambiguous group/scope rules.
+    pub fn new(base_scopes: Vec<String>, group_scopes: Vec<(String, Vec<String>)>) -> Result<Self> {
+        let base_scopes = normalize_registered_scopes(base_scopes)?;
+        let mut registered_group_scopes = BTreeMap::new();
+        for (group, scopes) in group_scopes {
+            let Some(group) = normalize_groups(vec![group])?.into_iter().next() else {
+                bail!("Identity access policy group cannot be empty");
+            };
+            let scopes = normalize_registered_scopes(scopes)?;
+            if registered_group_scopes
+                .insert(group.clone(), scopes)
+                .is_some()
+            {
+                bail!("Identity access policy repeats group {group}");
+            }
+        }
+        if base_scopes.is_empty() && registered_group_scopes.is_empty() {
+            bail!("Identity access policy must register at least one scope");
+        }
+        Ok(Self {
+            base_scopes,
+            group_scopes: registered_group_scopes,
+        })
+    }
+
+    fn admit(&self, requested: &str, groups: &[String]) -> Result<String, HttpError> {
+        let requested = canonical_requested_scopes(requested)?;
+        let admitted = self
+            .base_scopes
+            .iter()
+            .map(String::as_str)
+            .chain(
+                groups
+                    .iter()
+                    .filter_map(|group| self.group_scopes.get(group))
+                    .flatten()
+                    .map(String::as_str),
+            )
+            .collect::<BTreeSet<_>>();
+        if requested.iter().any(|scope| !admitted.contains(*scope)) {
+            return Err(HttpError::denied(
+                "the requested scope set is not admitted for this subject",
+            ));
+        }
+        Ok(requested.into_iter().collect::<Vec<_>>().join(" "))
+    }
+
+    fn update_generation(&self, digest: &mut Sha256) {
+        for scope in &self.base_scopes {
+            update_generation_field(digest, "base-scope");
+            update_generation_field(digest, scope);
+        }
+        for (group, scopes) in &self.group_scopes {
+            for scope in scopes {
+                update_generation_field(digest, "group-scope");
+                update_generation_field(digest, group);
+                update_generation_field(digest, scope);
+            }
         }
     }
 }
@@ -335,7 +375,7 @@ impl AudienceRegistry {
         self.access
             .iter()
             .find(|entry| entry.audience == audience)
-            .map(|entry| entry.policy)
+            .map(|entry| entry.policy.clone())
     }
 
     fn update_generation(&self, digest: &mut Sha256) {
@@ -347,7 +387,7 @@ impl AudienceRegistry {
         for entry in &self.access {
             update_generation_field(digest, "access");
             update_generation_field(digest, &entry.audience);
-            update_generation_field(digest, entry.policy.name());
+            entry.policy.update_generation(digest);
         }
     }
 }
@@ -1719,7 +1759,6 @@ struct LoginMetadata {
     authorization_endpoint: String,
     token_endpoint: String,
     access_token_endpoint: String,
-    connectors_endpoint: Option<String>,
     cli_client_id: String,
     response_types_supported: [&'static str; 1],
     grant_types_supported: [&'static str; 1],
@@ -2028,11 +2067,6 @@ async fn login_metadata(State(state): State<AppState>) -> Json<LoginMetadata> {
         authorization_endpoint: format!("{origin}/oauth/authorize"),
         token_endpoint: format!("{origin}/oauth/token"),
         access_token_endpoint: format!("{origin}/v1/access-token"),
-        connectors_endpoint: state
-            .config
-            .connectors_endpoint
-            .as_ref()
-            .map(|endpoint| endpoint.as_str().to_owned()),
         cli_client_id: state.config.cli_client_id.clone(),
         response_types_supported: ["code"],
         grant_types_supported: ["authorization_code"],
@@ -2062,9 +2096,7 @@ async fn issue_access_token(
         .config
         .static_group_memberships
         .groups_for(&admitted.tenant_id, admitted.email.as_deref());
-    let scope = match policy {
-        AccessAudiencePolicy::Connectors => admitted_connector_scope(&request.scope, &groups)?,
-    };
+    let scope = policy.admit(&request.scope, &groups)?;
     let now = unix_time().map_err(HttpError::internal)?;
     let credential = format!(
         "identity_access_v1_{}",
@@ -2305,7 +2337,7 @@ async fn upstream_callback(
         .id_token()
         .ok_or_else(|| HttpError::denied("upstream issuer returned no OpenID Connect ID token"))?;
     // Reparse the token with catch-all additional claims, then verify the same signed JWT before
-    // consulting a deployment-selected organization claim such as Google's `hd` claim.
+    // consulting a deployment-selected organization claim.
     let id_token = core_id_token
         .to_string()
         .parse::<UpstreamIdToken>()
@@ -2506,58 +2538,41 @@ fn bearer(headers: &HeaderMap, validator: fn(&str) -> bool) -> Option<&str> {
         .filter(|credential| validator(credential))
 }
 
-fn canonical_connector_scope(value: &str) -> Result<String, HttpError> {
+fn normalize_registered_scopes(scopes: Vec<String>) -> Result<BTreeSet<String>> {
+    let mut normalized = BTreeSet::new();
+    for scope in scopes {
+        if !valid_scope_name(&scope) || !normalized.insert(scope.clone()) {
+            bail!("Identity access scopes must be unique bounded printable ASCII names");
+        }
+    }
+    Ok(normalized)
+}
+
+fn canonical_requested_scopes(value: &str) -> Result<BTreeSet<&str>, HttpError> {
     if value.is_empty() || value.len() > 1024 {
-        return Err(HttpError::invalid("a bounded Connector scope is required"));
+        return Err(HttpError::invalid("a bounded scope set is required"));
     }
     let requested = value.split_ascii_whitespace().collect::<Vec<_>>();
-    if requested.is_empty() || requested.join(" ") != value {
+    if requested.is_empty()
+        || requested.join(" ") != value
+        || requested.iter().any(|scope| !valid_scope_name(scope))
+    {
         return Err(HttpError::invalid(
-            "Connector scopes must use one canonical ASCII-space separator",
+            "scopes must be canonical bounded printable ASCII names",
         ));
     }
     let scopes = requested.iter().copied().collect::<BTreeSet<_>>();
-    if scopes.len() != requested.len()
-        || scopes
-            .iter()
-            .any(|scope| !CONNECTORS_SCOPES.contains(scope))
-    {
-        return Err(HttpError::denied(
-            "the requested Connector scope set is not admitted",
-        ));
+    if scopes.len() != requested.len() {
+        return Err(HttpError::invalid("scopes must not repeat"));
     }
-    Ok(scopes.into_iter().collect::<Vec<_>>().join(" "))
+    Ok(scopes)
 }
 
-#[cfg(test)]
-fn bootstrap_connector_scope(value: &str) -> Result<String, HttpError> {
-    let scope = canonical_connector_scope(value)?;
-    if scope != "connectors.catalog.read" {
-        return Err(HttpError::denied(
-            "this bootstrap admits only authenticated Connector catalog discovery; receiver-owned Grant and management authorization are not implemented",
-        ));
-    }
-    Ok(scope)
-}
-
-fn admitted_connector_scope(value: &str, groups: &[String]) -> Result<String, HttpError> {
-    let scope = canonical_connector_scope(value)?;
-    if scope.split(' ').all(|member| {
-        matches!(
-            member,
-            "connectors.catalog.read"
-                | "connectors.connections.self"
-                | "connectors.credentials.lease"
-                | "connectors.events.self"
-                | "connectors.invoke"
-        )
-    }) || groups.iter().any(|group| group == "operator")
-    {
-        return Ok(scope);
-    }
-    Err(HttpError::denied(
-        "the authenticated principal is not admitted for effect-bearing Connector scopes",
-    ))
+fn valid_scope_name(value: &str) -> bool {
+    (1..=128).contains(&value.len())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b':' | b'/' | b'_' | b'-')
+        })
 }
 
 fn pkce_challenge(verifier: &str) -> String {
@@ -2651,16 +2666,21 @@ fn html_escape(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn access_policy() -> AccessAudiencePolicy {
+        AccessAudiencePolicy::new(
+            vec!["resource.read".to_owned()],
+            vec![("operator".to_owned(), vec!["resource.write".to_owned()])],
+        )
+        .unwrap()
+    }
+
     fn audience_registry() -> AudienceRegistry {
         AudienceRegistry::new(
             vec![
                 TEST_STATUS_AUDIENCE.to_owned(),
                 TEST_ZWIRN_AUDIENCE.to_owned(),
             ],
-            vec![(
-                TEST_CONNECTORS_AUDIENCE.to_owned(),
-                AccessAudiencePolicy::Connectors,
-            )],
+            vec![(TEST_ACCESS_AUDIENCE.to_owned(), access_policy())],
         )
         .unwrap()
     }
@@ -2669,9 +2689,6 @@ mod tests {
         Config {
             listen: "127.0.0.1:0".parse().unwrap(),
             public_origin: Url::parse("http://127.0.0.1:8080/").unwrap(),
-            connectors_endpoint: Some(
-                Url::parse("https://code.example.test/api/connectors/v1").unwrap(),
-            ),
             tenant_id: "tenant-dev".to_owned(),
             cli_client_id: "harness-cli".to_owned(),
             web_clients: vec![
@@ -2721,10 +2738,7 @@ mod tests {
         assert!(
             AudienceRegistry::new(
                 vec![TEST_STATUS_AUDIENCE.to_owned()],
-                vec![(
-                    TEST_STATUS_AUDIENCE.to_owned(),
-                    AccessAudiencePolicy::Connectors,
-                )],
+                vec![(TEST_STATUS_AUDIENCE.to_owned(), access_policy(),)],
             )
             .is_err()
         );
@@ -2734,12 +2748,9 @@ mod tests {
         changed.audience_registry = AudienceRegistry::new(
             vec![
                 TEST_STATUS_AUDIENCE.to_owned(),
-                "urn:b10x:devcenter".to_owned(),
+                "urn:example:console".to_owned(),
             ],
-            vec![(
-                TEST_CONNECTORS_AUDIENCE.to_owned(),
-                AccessAudiencePolicy::Connectors,
-            )],
+            vec![(TEST_ACCESS_AUDIENCE.to_owned(), access_policy())],
         )
         .unwrap();
         assert_ne!(
@@ -2750,7 +2761,7 @@ mod tests {
         assert!(
             changed
                 .audience_registry
-                .admits_session("urn:b10x:devcenter")
+                .admits_session("urn:example:console")
         );
         assert!(!changed.audience_registry.admits_session("urn:b10x:other"));
     }
@@ -3065,7 +3076,7 @@ mod tests {
             client_id: "harness-cli".to_owned(),
             redirect_uri: "http://127.0.0.1:43123/callback".to_owned(),
             code_challenge: pkce_challenge(&"b".repeat(64)),
-            subject: "google-subject".to_owned(),
+            subject: "upstream-subject".to_owned(),
             tenant_id: "tenant-dev".to_owned(),
             email: Some("developer@example.test".to_owned()),
         };
@@ -3088,7 +3099,7 @@ mod tests {
     async fn session_store_never_persists_the_plaintext_credential() {
         let store = Store::in_memory().unwrap();
         let identity = Identity {
-            subject: "google-subject".to_owned(),
+            subject: "upstream-subject".to_owned(),
             email: Some("developer@example.test".to_owned()),
         };
         store
@@ -3347,7 +3358,7 @@ mod tests {
         let store = Store::in_memory().unwrap();
         let config = config();
         let identity = Identity {
-            subject: "google-subject".to_owned(),
+            subject: "upstream-subject".to_owned(),
             email: Some("developer@example.test".to_owned()),
         };
         let credential = format!("identity_session_v1_{}", "a".repeat(43));
@@ -3362,7 +3373,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(admitted.tenant_id, "tenant-dev");
-        assert_eq!(admitted.subject, "google-subject");
+        assert_eq!(admitted.subject, "upstream-subject");
         assert!(
             store
                 .resolve_session(
@@ -3380,7 +3391,7 @@ mod tests {
         let store = Store::in_memory().unwrap();
         let config = config();
         let identity = Identity {
-            subject: "google-subject".to_owned(),
+            subject: "upstream-subject".to_owned(),
             email: None,
         };
         let credential = format!("identity_session_v1_{}", "c".repeat(43));
@@ -3403,7 +3414,7 @@ mod tests {
         let authority = AccessAuthority {
             iss: config.issuer().to_owned(),
             sub: identity.subject.clone(),
-            aud: TEST_CONNECTORS_AUDIENCE.to_owned(),
+            aud: TEST_ACCESS_AUDIENCE.to_owned(),
             iat: now,
             nbf: now,
             exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
@@ -3411,7 +3422,7 @@ mod tests {
             act: Actor {
                 sub: identity.subject.clone(),
             },
-            scope: "connectors.catalog.read".to_owned(),
+            scope: "resource.read".to_owned(),
             principal_kind: "human".to_owned(),
             tenant_id: config.tenant_id.clone(),
             email: identity.email.clone(),
@@ -3434,7 +3445,7 @@ mod tests {
         );
         assert!(
             store
-                .resolve_access_token(&access, TEST_CONNECTORS_AUDIENCE)
+                .resolve_access_token(&access, TEST_ACCESS_AUDIENCE)
                 .await
                 .unwrap()
                 .is_none()
@@ -3460,16 +3471,16 @@ mod tests {
         let now = unix_time().unwrap();
         let authority = AccessAuthority {
             iss: "https://identity.example.test".to_owned(),
-            sub: "google-subject".to_owned(),
-            aud: TEST_CONNECTORS_AUDIENCE.to_owned(),
+            sub: "upstream-subject".to_owned(),
+            aud: TEST_ACCESS_AUDIENCE.to_owned(),
             iat: now,
             nbf: now,
             exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
             jti: "identity_jti_v1_test".to_owned(),
             act: Actor {
-                sub: "google-subject".to_owned(),
+                sub: "upstream-subject".to_owned(),
             },
-            scope: "connectors.catalog.read connectors.invoke".to_owned(),
+            scope: "resource.read resource.write".to_owned(),
             principal_kind: "human".to_owned(),
             tenant_id: "tenant-dev".to_owned(),
             email: Some("developer@example.test".to_owned()),
@@ -3491,7 +3502,7 @@ mod tests {
             .unwrap();
         assert_eq!(raw_count, 0);
         let resolved = store
-            .resolve_access_token(&credential, TEST_CONNECTORS_AUDIENCE)
+            .resolve_access_token(&credential, TEST_ACCESS_AUDIENCE)
             .await
             .unwrap()
             .unwrap();
@@ -3506,17 +3517,20 @@ mod tests {
     }
 
     #[test]
-    fn connector_scope_vocabulary_is_exact_and_canonical() {
+    fn access_scope_registration_is_generic_exact_and_canonical() {
+        let policy = access_policy();
         assert_eq!(
-            canonical_connector_scope("connectors.invoke connectors.catalog.read").unwrap(),
-            "connectors.catalog.read connectors.invoke"
+            policy
+                .admit("resource.read resource.write", &["operator".to_owned()])
+                .unwrap(),
+            "resource.read resource.write"
         );
         for invalid in [
-            "connectors.catalog.read  connectors.invoke",
-            "connectors.catalog.read connectors.catalog.read",
-            "connectors.admin",
+            "resource.read  resource.write",
+            "resource.read resource.read",
+            "resource.unknown",
         ] {
-            assert!(canonical_connector_scope(invalid).is_err());
+            assert!(policy.admit(invalid, &["operator".to_owned()]).is_err());
         }
         assert!(valid_access_credential(&format!(
             "identity_access_v1_{}",
@@ -3524,58 +3538,28 @@ mod tests {
         )));
         assert!(!valid_access_credential("identity_access_v1_short"));
         assert_eq!(
-            bootstrap_connector_scope("connectors.catalog.read").unwrap(),
-            "connectors.catalog.read"
-        );
-        assert!(bootstrap_connector_scope("connectors.invoke").is_err());
-        assert_eq!(
-            admitted_connector_scope(
-                "connectors.catalog.read connectors.events.read connectors.invoke",
-                &["operator".to_owned()],
-            )
-            .unwrap(),
-            "connectors.catalog.read connectors.events.read connectors.invoke"
-        );
-        assert_eq!(
-            admitted_connector_scope("connectors.invoke", &["member".to_owned()]).unwrap(),
-            "connectors.invoke"
-        );
-        assert_eq!(
-            admitted_connector_scope("connectors.events.self", &["member".to_owned()]).unwrap(),
-            "connectors.events.self"
+            policy
+                .admit("resource.read", &["member".to_owned()])
+                .unwrap(),
+            "resource.read"
         );
         assert!(
-            admitted_connector_scope("connectors.events.read", &["member".to_owned()]).is_err()
+            policy
+                .admit("resource.write", &["member".to_owned()])
+                .is_err()
         );
         assert_eq!(
-            admitted_connector_scope(
-                "connectors.catalog.read connectors.invoke",
-                &["member".to_owned()],
-            )
-            .unwrap(),
-            "connectors.catalog.read connectors.invoke"
-        );
-        assert_eq!(
-            admitted_connector_scope(
-                "connectors.catalog.read connectors.connections.self connectors.credentials.lease connectors.events.self connectors.invoke",
-                &["member".to_owned()],
-            )
-            .unwrap(),
-            "connectors.catalog.read connectors.connections.self connectors.credentials.lease connectors.events.self connectors.invoke"
-        );
-        assert!(
-            admitted_connector_scope(
-                "connectors.catalog.read connectors.events.read",
-                &["member".to_owned()],
-            )
-            .is_err()
+            policy
+                .admit("resource.write", &["operator".to_owned()])
+                .unwrap(),
+            "resource.write"
         );
     }
 
     #[test]
     fn internal_audiences_are_exact_and_disjoint() {
         let audiences = [
-            TEST_CONNECTORS_AUDIENCE,
+            TEST_ACCESS_AUDIENCE,
             TEST_STATUS_AUDIENCE,
             TEST_ZWIRN_AUDIENCE,
             directory::DIRECTORY_AUDIENCE,
