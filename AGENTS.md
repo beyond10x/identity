@@ -153,8 +153,7 @@ repository has no `CHANGELOG.md`; if one is added, its heading is the version th
 | The current milestone | Agnostic relying-party registration — see the governed planning store |
 | The deployed behaviour a client depends on | `README.md` |
 
-## Bot identity
+## Public source
 
-Automated commits and pushes go through the GitHub App via `scripts/as-bot.sh`, never a human
-credential. `scripts/bot-token.sh` mints the token; its bot-org default (`scripts/bot-token.sh:8`)
-is `beyond10x` today — confirm that before relying on it.
+This repository is public. Organization delivery credentials and bot-authenticated remote
+operations are provided by Atlas-owned tooling outside component source.

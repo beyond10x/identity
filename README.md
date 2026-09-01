@@ -22,8 +22,8 @@ coarse gate only — it must still run its own admission before an effect-bearin
 
 ## Status
 
-**The deployable human-login and relying-party authority slice.** The workspace is private and not
-published to crates.io.
+**The deployable human-login and relying-party authority slice.** The source is public; its crates
+remain deployment components and are not published to crates.io.
 
 | area | state |
 |---|---|

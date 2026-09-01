@@ -1,0 +1,15 @@
+schema: b10x-change/v1
+id: identity/public-surface-2026-09-01
+repository: identity
+publishedAt: 2026-09-01T12:00:00Z
+title: Identity joins the public ecosystem surface
+summary: Identity now advertises its service boundary, local adoption path, API reference, dependencies, and deployment maturity through the shared b10x documentation contract.
+kind: capability
+impact: significant
+source:
+  url: https://github.com/beyond10x/identity
+journeys: [build-agents, operate-services]
+affectedSurfaces: [identity/docs]
+relations:
+  - {target: surface:connectors/docs, kind: enables, label: Issues bounded Connector authority}
+  - {target: surface:agent-platform/docs, kind: enables, label: Supplies tenant and principal truth}

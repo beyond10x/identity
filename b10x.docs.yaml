@@ -1,0 +1,34 @@
+schema: b10x-docs/v2
+repository:
+  id: identity
+  url: https://github.com/beyond10x/identity
+surfaces:
+  - id: docs
+    name: Identity
+    summary: Public service and library documentation for login, tenant-scoped principals, sessions, audience-bound authority, directories, and collaboration profiles.
+    kind: service-docs
+    canonicalUrl: https://github.com/beyond10x/identity#readme
+    maturity: development
+    availability: published
+    discoverability: public
+    audiences: [adopter, developer, operator]
+    journeys: [build-agents, operate-services]
+    capabilities: [oidc-login, tenant-identity, audience-authority, organization-directory]
+    sections:
+      - {label: Run locally, url: https://github.com/beyond10x/identity#running-it-locally, kind: quickstart}
+      - {label: Routes, url: https://github.com/beyond10x/identity#routes, kind: api}
+      - {label: Architecture rules, url: https://github.com/beyond10x/identity#the-rules-that-shape-the-code, kind: docs}
+      - {label: Source, url: https://github.com/beyond10x/identity, kind: source}
+    relationships:
+      - {target: connectors/docs, kind: supports, label: Issues exact-audience Connector authority}
+      - {target: agent-platform/docs, kind: supports, label: Supplies tenant and principal truth}
+      - {target: eventlog/docs, kind: uses, label: Stores durable Identity-owned state as events}
+    adoption:
+      label: Run Identity locally
+      url: https://github.com/beyond10x/identity#running-it-locally
+      mode: source-build
+      estimatedMinutes: 15
+      prerequisites: [Rust toolchain, OIDC client]
+      outcome: Start the local service and complete the standard authorization-code flow.
+    accent: "#81a9ff"
+    shell: {integration: portable, revision: 73aefe1ca268cc853ed38fb23478454496462a03}
