@@ -86,6 +86,48 @@ pub struct SessionExchange {
     pub email: Option<String>,
 }
 
+/// A short-lived opaque access credential. Its allocation is wiped on drop and diagnostics never
+/// expose it.
+#[derive(Clone)]
+pub struct AccessCredential(Zeroizing<String>);
+
+impl AccessCredential {
+    #[must_use]
+    pub fn expose_at_authorization_boundary(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Debug for AccessCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AccessCredential([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AccessToken {
+    pub credential: AccessCredential,
+    pub expires_in: i64,
+    pub audience: String,
+    pub scope: String,
+}
+
+#[derive(Serialize)]
+struct AccessTokenRequest<'a> {
+    audience: &'a str,
+    scope: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccessTokenResponse {
+    access_token: String,
+    token_type: String,
+    expires_in: i64,
+    audience: String,
+    scope: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionExchangeResponse {
@@ -247,6 +289,45 @@ impl IdentityClient {
         Ok(authority)
     }
 
+    /// Exchanges a live Identity session for a short-lived exact-audience access credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error without exposing the session or returned access credential.
+    pub async fn issue_access_token(
+        &self,
+        session_authorization: &str,
+        audience: &str,
+        scope: &str,
+    ) -> Result<AccessToken, ClientError> {
+        let authorization = HeaderValue::from_str(session_authorization)
+            .map_err(|_| ClientError::Configuration("authorization header is malformed"))?;
+        let response = self
+            .http
+            .post(self.endpoint("v1/access-token")?)
+            .header(AUTHORIZATION, authorization)
+            .json(&AccessTokenRequest { audience, scope })
+            .send()
+            .await
+            .map_err(ClientError::Transport)?;
+        require_confidential(&response)?;
+        let response: AccessTokenResponse = decode_status(response).await?;
+        if response.token_type != "Bearer"
+            || response.expires_in <= 0
+            || response.access_token.is_empty()
+            || response.audience != audience
+            || response.scope != scope
+        {
+            return Err(ClientError::UnexpectedStatus(502));
+        }
+        Ok(AccessToken {
+            credential: AccessCredential(Zeroizing::new(response.access_token)),
+            expires_in: response.expires_in,
+            audience: response.audience,
+            scope: response.scope,
+        })
+    }
+
     fn endpoint(&self, path: &'static str) -> Result<Url, ClientError> {
         self.origin
             .join(path)
@@ -294,7 +375,7 @@ mod tests {
     use axum::Router;
     use axum::http::{HeaderMap, StatusCode, header};
     use axum::response::{IntoResponse, Response};
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use serde_json::json;
 
     use super::*;
@@ -322,13 +403,37 @@ mod tests {
         response
     }
 
+    async fn access(headers: HeaderMap) -> Response {
+        assert_eq!(
+            headers.get(header::AUTHORIZATION),
+            Some(&HeaderValue::from_static("Bearer synthetic-session"))
+        );
+        let mut response = axum::Json(json!({
+            "access_token":"synthetic-access",
+            "token_type":"Bearer",
+            "expires_in":300,
+            "audience":"urn:b10x:connectors",
+            "scope":"connectors.connections.self"
+        }))
+        .into_response();
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+            .headers_mut()
+            .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+        response
+    }
+
     async fn test_origin() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(
                 listener,
-                Router::new().route("/v1/session-authority", get(authority)),
+                Router::new()
+                    .route("/v1/session-authority", get(authority))
+                    .route("/v1/access-token", post(access)),
             )
             .await
             .unwrap();
@@ -346,6 +451,26 @@ mod tests {
         assert_eq!(authority.tenant_id, "tenant-1");
         assert_eq!(authority.subject, "subject-1");
         assert!(!format!("{client:?}").contains("synthetic-session"));
+    }
+
+    #[tokio::test]
+    async fn short_lived_access_credentials_are_exact_and_redacted() {
+        let client = IdentityClient::new(&test_origin().await, "urn:b10x:devcenter").unwrap();
+        let access = client
+            .issue_access_token(
+                "Bearer synthetic-session",
+                "urn:b10x:connectors",
+                "connectors.connections.self",
+            )
+            .await
+            .unwrap();
+        assert_eq!(access.expires_in, 300);
+        assert_eq!(access.audience, "urn:b10x:connectors");
+        assert_eq!(access.scope, "connectors.connections.self");
+        assert_eq!(
+            format!("{:?}", access.credential),
+            "AccessCredential([REDACTED])"
+        );
     }
 
     #[test]

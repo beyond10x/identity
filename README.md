@@ -25,7 +25,7 @@ coarse gate only — it must still run its own admission before an effect-bearin
 
 ## Status
 
-**The deployable human-login and relying-party authority slice.** Version `0.2.0`,
+**The deployable human-login and relying-party authority slice.** Version `0.2.1`,
 `publish = false`, no git tag cut.
 
 | area | state |
