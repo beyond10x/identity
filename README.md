@@ -167,6 +167,10 @@ The person may see exactly what a consumer is given; a consumer may see nothing 
 
 Request bodies are capped at 64 KiB. Upstream OIDC uses a five-second connect and fifteen-second
 total deadline. Session, access-token and authority responses carry `no-store` and `no-cache`.
+Session credentials use the opaque `identity_session_v1_` format and short-lived access
+credentials use `identity_access_v1_`; callers must treat both as indivisible bearer values. The
+resolved authority vocabulary is product-neutral: `tenant_id` and `principal_kind` carry the
+tenant and actor kind without an inherited product namespace.
 
 Every credential table has a finite row cap, and so do the directory and the profile: 100 000
 principals and 10 000 groups per tenant, 512 members per group, 512 groups per subject, 512
@@ -217,4 +221,6 @@ These are the reasons the surface looks the way it does. The full statements are
 
 - [`docs/decisions/0001-verified-organization-tenant-resolution.md`](docs/decisions/0001-verified-organization-tenant-resolution.md)
   — why tenant comes from a verified claim and nothing else.
+- [`docs/decisions/0003-product-neutral-wire-vocabulary.md`](docs/decisions/0003-product-neutral-wire-vocabulary.md)
+  — why credentials and resolved authority fields use Identity-owned names.
 - [`AGENTS.md`](AGENTS.md) — working agreements, invariants, and the release procedure.

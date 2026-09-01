@@ -102,7 +102,7 @@ pub(crate) struct GroupRequest {
 #[derive(Debug, Serialize)]
 struct MemberView {
     iss: String,
-    dl_tenant: String,
+    tenant_id: String,
     sub: String,
     principal_kind: String,
     display_name: String,
@@ -119,7 +119,7 @@ struct GroupSummaryView {
 #[derive(Debug, Serialize)]
 struct MembershipView {
     iss: String,
-    dl_tenant: String,
+    tenant_id: String,
     sub: String,
     principal_kind: String,
     display_name: String,
@@ -133,7 +133,7 @@ struct MembershipView {
 #[derive(Debug, Serialize)]
 struct GroupView {
     iss: String,
-    dl_tenant: String,
+    tenant_id: String,
     group_key: String,
     display_name: String,
     /// Flat by construction: a group may not contain another group.
@@ -741,7 +741,7 @@ pub(crate) async fn upsert_member(
         .map_err(HttpError::internal)?;
     Ok(confidential_json(MemberView {
         iss: state.config.issuer().to_owned(),
-        dl_tenant: tenant_id,
+        tenant_id,
         sub: record.subject,
         principal_kind: record.principal_kind,
         display_name: record.display_name,
@@ -913,7 +913,7 @@ pub(crate) async fn read_own_membership(
     };
     Ok(confidential_json(MembershipView {
         iss: state.config.issuer().to_owned(),
-        dl_tenant: tenant_id,
+        tenant_id,
         sub: member.subject,
         principal_kind: member.principal_kind,
         display_name: member.display_name,
@@ -940,7 +940,7 @@ async fn group_response(
         .map_err(HttpError::internal)?;
     Ok(confidential_json(GroupView {
         iss: state.config.issuer().to_owned(),
-        dl_tenant: tenant_id.to_owned(),
+        tenant_id: tenant_id.to_owned(),
         group_key: group.group_key.clone(),
         display_name: group.display_name.clone(),
         nested: false,

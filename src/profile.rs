@@ -72,8 +72,8 @@ const RESOLVED_STATES: [&str; 2] = ["rejected", "revoked"];
 const CONFIRMED_STATE: &str = "confirmed";
 const PERSON_SOURCE_REFERENCE: &str = "person:self";
 
-const STATEMENT_ID_PREFIX: &str = "dl_profile_stmt_v1_";
-const SNAPSHOT_ID_PREFIX: &str = "dl_profile_snapshot_v1_";
+const STATEMENT_ID_PREFIX: &str = "identity_profile_statement_v1_";
+const SNAPSHOT_ID_PREFIX: &str = "identity_profile_snapshot_v1_";
 const STATEMENT_ID_TOKEN_CHARACTERS: usize = 22;
 
 const MAX_STATEMENT_CHARACTERS: usize = 512;
@@ -229,7 +229,7 @@ pub(crate) struct CorrectionRequest {
 #[derive(Debug, Serialize)]
 struct ProfileView {
     iss: String,
-    dl_tenant: String,
+    tenant_id: String,
     sub: String,
     learning_consent: bool,
     consent_scope: &'static str,
@@ -263,7 +263,7 @@ struct RetainedStatementView {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProfileSnapshot {
     iss: String,
-    dl_tenant: String,
+    tenant_id: String,
     sub: String,
     snapshot_id: String,
     /// Always true. Everything in this value is explicitly admitted to a model.
@@ -466,7 +466,7 @@ pub(crate) fn project(
     let snapshot_id = snapshot_id(issuer, tenant_id, subject, learning, &statements);
     ProfileSnapshot {
         iss: issuer.to_owned(),
-        dl_tenant: tenant_id.to_owned(),
+        tenant_id: tenant_id.to_owned(),
         sub: subject.to_owned(),
         snapshot_id,
         model_visible: true,
@@ -966,7 +966,7 @@ async fn durable_response(state: &AppState, owner: &ProfileSubject) -> Result<Re
     let learning = consent.is_some_and(|consent| consent.learning);
     Ok(confidential_json(ProfileView {
         iss: state.config.issuer().to_owned(),
-        dl_tenant: owner.tenant_id.clone(),
+        tenant_id: owner.tenant_id.clone(),
         sub: owner.subject.clone(),
         learning_consent: learning,
         consent_scope: LEARNING_CONSENT_SCOPE,
@@ -1331,7 +1331,7 @@ mod tests {
 
     fn statement(id: &str, state: &str, content: &str, source: &str) -> StatementRecord {
         StatementRecord {
-            statement_id: format!("dl_profile_stmt_v1_{id}"),
+            statement_id: format!("identity_profile_statement_v1_{id}"),
             kind: "preference".to_owned(),
             horizon: None,
             content: content.to_owned(),
@@ -1525,7 +1525,7 @@ mod tests {
     fn a_secret_shaped_value_is_refused_entry_to_a_projection() {
         for smuggled in [
             "the deployment password=hunter2 lives in the runbook",
-            "session dl_session_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa is mine",
+            "session identity_session_v1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa is mine",
             "uses ghp_16CharactersOrMoreOfOpaqueMaterial for the mirror",
         ] {
             assert!(
@@ -1627,7 +1627,11 @@ mod tests {
             &retained,
         );
         assert_eq!(first, again);
-        assert!(first.snapshot_id.starts_with("dl_profile_snapshot_v1_"));
+        assert!(
+            first
+                .snapshot_id
+                .starts_with("identity_profile_snapshot_v1_")
+        );
         assert!(first.model_visible);
 
         let mut changed = retained.clone();
@@ -1726,7 +1730,7 @@ mod tests {
             subject: SUBJECT.to_owned(),
             email: Some("person@example.test".to_owned()),
         };
-        let credential = format!("dl_session_v1_{}", "a".repeat(43));
+        let credential = format!("identity_session_v1_{}", "a".repeat(43));
         store
             .put_session(&credential, &config, TENANT, &identity)
             .await

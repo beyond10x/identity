@@ -54,7 +54,6 @@ pub struct SessionAuthority {
     #[serde(rename = "exp")]
     pub expires_at: i64,
     pub email: Option<String>,
-    #[serde(rename = "dl_tenant")]
     pub tenant_id: String,
     pub groups: Vec<String>,
 }
@@ -390,7 +389,7 @@ mod tests {
             "aud":"urn:b10x:devcenter",
             "exp":4_102_444_800_i64,
             "email":"person@example.test",
-            "dl_tenant":"tenant-1",
+            "tenant_id":"tenant-1",
             "groups":["member"]
         }))
         .into_response();

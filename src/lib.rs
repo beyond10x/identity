@@ -74,12 +74,13 @@ const MAX_SESSIONS: i64 = 100_000;
 const MAX_ACCESS_TOKENS: i64 = 100_000;
 const MAX_HTTP_BODY_BYTES: usize = 64 * 1024;
 const POSTGRES_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const CONNECTORS_SCOPES: [&str; 11] = [
+const CONNECTORS_SCOPES: [&str; 12] = [
     "connectors.audit.read",
     "connectors.catalog.read",
     "connectors.channels.manage",
     "connectors.connections.manage",
     "connectors.connections.self",
+    "connectors.credentials.lease",
     "connectors.deliveries.manage",
     "connectors.events.read",
     "connectors.events.self",
@@ -1318,8 +1319,8 @@ impl Store {
                         authority.jti,
                         authority.act.sub,
                         authority.scope,
-                        authority.dl_principal_kind,
-                        authority.dl_tenant,
+                        authority.principal_kind,
+                        authority.tenant_id,
                         authority.email,
                         groups,
                     ],
@@ -1345,8 +1346,8 @@ impl Store {
                             &authority.jti,
                             &authority.act.sub,
                             &authority.scope,
-                            &authority.dl_principal_kind,
-                            &authority.dl_tenant,
+                            &authority.principal_kind,
+                            &authority.tenant_id,
                             &authority.email,
                             &groups,
                         ],
@@ -1400,8 +1401,8 @@ impl Store {
                         jti: row.get(6),
                         act: Actor { sub: row.get(7) },
                         scope: row.get(8),
-                        dl_principal_kind: row.get(9),
-                        dl_tenant: row.get(10),
+                        principal_kind: row.get(9),
+                        tenant_id: row.get(10),
                         email: row.get(11),
                         groups: groups_from_storage(&row.get::<_, String>(12)),
                     })
@@ -1625,8 +1626,8 @@ fn access_authority_from_sqlite_row(row: &rusqlite::Row<'_>) -> rusqlite::Result
         jti: row.get(6)?,
         act: Actor { sub: row.get(7)? },
         scope: row.get(8)?,
-        dl_principal_kind: row.get(9)?,
-        dl_tenant: row.get(10)?,
+        principal_kind: row.get(9)?,
+        tenant_id: row.get(10)?,
         email: row.get(11)?,
         groups: groups_from_storage(&row.get::<_, String>(12)?),
     })
@@ -1743,7 +1744,7 @@ struct SessionAuthority {
     aud: String,
     exp: i64,
     email: Option<String>,
-    dl_tenant: String,
+    tenant_id: String,
     groups: Vec<String>,
 }
 
@@ -1789,8 +1790,8 @@ struct AccessAuthority {
     jti: String,
     act: Actor,
     scope: String,
-    dl_principal_kind: String,
-    dl_tenant: String,
+    principal_kind: String,
+    tenant_id: String,
     email: Option<String>,
     groups: Vec<String>,
 }
@@ -2066,7 +2067,7 @@ async fn issue_access_token(
     };
     let now = unix_time().map_err(HttpError::internal)?;
     let credential = format!(
-        "dl_access_v1_{}",
+        "identity_access_v1_{}",
         random_token(32).map_err(HttpError::internal)?
     );
     let authority = AccessAuthority {
@@ -2082,15 +2083,15 @@ async fn issue_access_token(
         nbf: now,
         exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
         jti: format!(
-            "dl_jti_v1_{}",
+            "identity_jti_v1_{}",
             random_token(16).map_err(HttpError::internal)?
         ),
         act: Actor {
             sub: admitted.subject,
         },
         scope: scope.clone(),
-        dl_principal_kind: "human".to_owned(),
-        dl_tenant: admitted.tenant_id,
+        principal_kind: "human".to_owned(),
+        tenant_id: admitted.tenant_id,
         email: admitted.email,
         groups,
     };
@@ -2127,7 +2128,7 @@ async fn session_authority(
         aud: audience.to_owned(),
         exp: admitted.expires_at,
         email: admitted.email,
-        dl_tenant: admitted.tenant_id,
+        tenant_id: admitted.tenant_id,
         groups,
     }))
 }
@@ -2379,7 +2380,7 @@ async fn exchange_token(
         return Err(HttpError::denied("authorization code binding failed"));
     }
     let credential = format!(
-        "dl_session_v1_{}",
+        "identity_session_v1_{}",
         random_token(32).map_err(HttpError::internal)?
     );
     let identity = Identity {
@@ -2486,13 +2487,13 @@ fn valid_b64_token(value: &str, minimum: usize, maximum: usize) -> bool {
 
 fn valid_session_credential(value: &str) -> bool {
     value
-        .strip_prefix("dl_session_v1_")
+        .strip_prefix("identity_session_v1_")
         .is_some_and(|token| valid_b64_token(token, 43, 43))
 }
 
 fn valid_access_credential(value: &str) -> bool {
     value
-        .strip_prefix("dl_access_v1_")
+        .strip_prefix("identity_access_v1_")
         .is_some_and(|token| valid_b64_token(token, 43, 43))
 }
 
@@ -2546,6 +2547,7 @@ fn admitted_connector_scope(value: &str, groups: &[String]) -> Result<String, Ht
             member,
             "connectors.catalog.read"
                 | "connectors.connections.self"
+                | "connectors.credentials.lease"
                 | "connectors.events.self"
                 | "connectors.invoke"
         )
@@ -3090,7 +3092,12 @@ mod tests {
             email: Some("developer@example.test".to_owned()),
         };
         store
-            .put_session("dl_session_v1_secret", &config(), "tenant-dev", &identity)
+            .put_session(
+                "identity_session_v1_secret",
+                &config(),
+                "tenant-dev",
+                &identity,
+            )
             .await
             .unwrap();
         let raw_count: i64 = store
@@ -3098,7 +3105,7 @@ mod tests {
             .unwrap()
             .query_row(
                 "SELECT count(*) FROM sessions WHERE verifier_hash = ?1",
-                [b"dl_session_v1_secret".as_slice()],
+                [b"identity_session_v1_secret".as_slice()],
                 |row| row.get(0),
             )
             .unwrap();
@@ -3137,7 +3144,7 @@ mod tests {
                    created_at, last_used_at, idle_expires_at, absolute_expires_at, revoked_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?6, ?7, ?8, NULL)",
                 params![
-                    hash("dl_session_v1_already_issued"),
+                    hash("identity_session_v1_already_issued"),
                     config.issuer(),
                     config.configuration_generation(),
                     config.tenant_id,
@@ -3152,7 +3159,7 @@ mod tests {
         let store = Store::from_sqlite_connection(connection).unwrap();
 
         let admitted = store
-            .resolve_session("dl_session_v1_already_issued", &config)
+            .resolve_session("identity_session_v1_already_issued", &config)
             .await
             .unwrap()
             .expect("a credential issued before the migration must keep working");
@@ -3186,7 +3193,7 @@ mod tests {
         }
         assert!(
             store
-                .resolve_session("dl_session_v1_already_issued", &config)
+                .resolve_session("identity_session_v1_already_issued", &config)
                 .await
                 .unwrap()
                 .is_some()
@@ -3275,7 +3282,10 @@ mod tests {
         );
         let now = unix_time().unwrap();
         let mut record = profile::StatementRecord {
-            statement_id: format!("dl_profile_stmt_v1_{}", random_token(16).unwrap()),
+            statement_id: format!(
+                "identity_profile_statement_v1_{}",
+                random_token(16).unwrap()
+            ),
             kind: "preference".to_owned(),
             horizon: None,
             content: "prefers written briefs".to_owned(),
@@ -3340,7 +3350,7 @@ mod tests {
             subject: "google-subject".to_owned(),
             email: Some("developer@example.test".to_owned()),
         };
-        let credential = format!("dl_session_v1_{}", "a".repeat(43));
+        let credential = format!("identity_session_v1_{}", "a".repeat(43));
         store
             .put_session(&credential, &config, "tenant-dev", &identity)
             .await
@@ -3356,7 +3366,7 @@ mod tests {
         assert!(
             store
                 .resolve_session(
-                    "dl_session_v1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "identity_session_v1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     &config,
                 )
                 .await
@@ -3373,7 +3383,7 @@ mod tests {
             subject: "google-subject".to_owned(),
             email: None,
         };
-        let credential = format!("dl_session_v1_{}", "c".repeat(43));
+        let credential = format!("identity_session_v1_{}", "c".repeat(43));
         store
             .put_session(&credential, &config, "tenant-dev", &identity)
             .await
@@ -3397,17 +3407,17 @@ mod tests {
             iat: now,
             nbf: now,
             exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
-            jti: "dl_jti_v1_logout".to_owned(),
+            jti: "identity_jti_v1_logout".to_owned(),
             act: Actor {
                 sub: identity.subject.clone(),
             },
             scope: "connectors.catalog.read".to_owned(),
-            dl_principal_kind: "human".to_owned(),
-            dl_tenant: config.tenant_id.clone(),
+            principal_kind: "human".to_owned(),
+            tenant_id: config.tenant_id.clone(),
             email: identity.email.clone(),
             groups: Vec::new(),
         };
-        let access = format!("dl_access_v1_{}", "d".repeat(43));
+        let access = format!("identity_access_v1_{}", "d".repeat(43));
         store.put_access_token(&access, &authority).await.unwrap();
         assert!(
             store
@@ -3434,12 +3444,12 @@ mod tests {
     #[test]
     fn session_credential_shape_is_closed() {
         assert!(valid_session_credential(&format!(
-            "dl_session_v1_{}",
+            "identity_session_v1_{}",
             "a".repeat(43)
         )));
-        assert!(!valid_session_credential("dl_session_v1_short"));
+        assert!(!valid_session_credential("identity_session_v1_short"));
         assert!(!valid_session_credential(&format!(
-            "dl_session_v2_{}",
+            "identity_session_v2_{}",
             "a".repeat(43)
         )));
     }
@@ -3455,17 +3465,17 @@ mod tests {
             iat: now,
             nbf: now,
             exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
-            jti: "dl_jti_v1_test".to_owned(),
+            jti: "identity_jti_v1_test".to_owned(),
             act: Actor {
                 sub: "google-subject".to_owned(),
             },
             scope: "connectors.catalog.read connectors.invoke".to_owned(),
-            dl_principal_kind: "human".to_owned(),
-            dl_tenant: "tenant-dev".to_owned(),
+            principal_kind: "human".to_owned(),
+            tenant_id: "tenant-dev".to_owned(),
             email: Some("developer@example.test".to_owned()),
             groups: vec!["operator".to_owned()],
         };
-        let credential = format!("dl_access_v1_{}", "a".repeat(43));
+        let credential = format!("identity_access_v1_{}", "a".repeat(43));
         store
             .put_access_token(&credential, &authority)
             .await
@@ -3509,10 +3519,10 @@ mod tests {
             assert!(canonical_connector_scope(invalid).is_err());
         }
         assert!(valid_access_credential(&format!(
-            "dl_access_v1_{}",
+            "identity_access_v1_{}",
             "a".repeat(43)
         )));
-        assert!(!valid_access_credential("dl_access_v1_short"));
+        assert!(!valid_access_credential("identity_access_v1_short"));
         assert_eq!(
             bootstrap_connector_scope("connectors.catalog.read").unwrap(),
             "connectors.catalog.read"
@@ -3547,11 +3557,11 @@ mod tests {
         );
         assert_eq!(
             admitted_connector_scope(
-                "connectors.catalog.read connectors.connections.self connectors.events.self connectors.invoke",
+                "connectors.catalog.read connectors.connections.self connectors.credentials.lease connectors.events.self connectors.invoke",
                 &["member".to_owned()],
             )
             .unwrap(),
-            "connectors.catalog.read connectors.connections.self connectors.events.self connectors.invoke"
+            "connectors.catalog.read connectors.connections.self connectors.credentials.lease connectors.events.self connectors.invoke"
         );
         assert!(
             admitted_connector_scope(
