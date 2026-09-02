@@ -57,6 +57,41 @@ pub struct SessionAuthority {
     pub groups: Vec<String>,
 }
 
+/// Non-secret authority returned after Identity resolves a short-lived access credential.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AccessAuthority {
+    #[serde(rename = "iss")]
+    pub issuer: String,
+    #[serde(rename = "sub")]
+    pub subject: String,
+    #[serde(rename = "aud")]
+    pub audience: String,
+    #[serde(rename = "iat")]
+    pub issued_at: i64,
+    #[serde(rename = "nbf")]
+    pub not_before: i64,
+    #[serde(rename = "exp")]
+    pub expires_at: i64,
+    #[serde(rename = "jti")]
+    pub token_id: String,
+    #[serde(rename = "act")]
+    pub actor: AccessActor,
+    pub scope: String,
+    pub principal_kind: String,
+    pub tenant_id: String,
+    pub email: Option<String>,
+    pub groups: Vec<String>,
+}
+
+/// Actor carried by an access authority without exposing its credential.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AccessActor {
+    #[serde(rename = "sub")]
+    pub subject: String,
+}
+
 /// One upstream sign-in identity explicitly linked to the current person.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -304,6 +339,38 @@ impl IdentityClient {
         Ok(authority)
     }
 
+    /// Resolves a short-lived access credential for one exact resource audience.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed refusal for expired, revoked, malformed and wrong-audience credentials
+    /// without carrying the credential or Identity's response body into diagnostics.
+    pub async fn resolve_access_token(
+        &self,
+        authorization: &str,
+        audience: &str,
+    ) -> Result<AccessAuthority, ClientError> {
+        let authorization = HeaderValue::from_str(authorization)
+            .map_err(|_| ClientError::Configuration("authorization header is malformed"))?;
+        if audience.trim() != audience || audience.is_empty() || audience.len() > 512 {
+            return Err(ClientError::Configuration("audience is malformed"));
+        }
+        let response = self
+            .http
+            .get(self.endpoint("v1/access-authority")?)
+            .header(AUTHORIZATION, authorization)
+            .header(AUDIENCE_HEADER, audience)
+            .send()
+            .await
+            .map_err(ClientError::Transport)?;
+        require_confidential(&response)?;
+        let authority: AccessAuthority = decode_status(response).await?;
+        if authority.audience != audience {
+            return Err(ClientError::Forbidden);
+        }
+        Ok(authority)
+    }
+
     /// Exchanges a live Identity session for a short-lived exact-audience access credential.
     ///
     /// # Errors
@@ -514,6 +581,40 @@ mod tests {
         response
     }
 
+    async fn access_authority(headers: HeaderMap) -> Response {
+        assert_eq!(
+            headers.get(header::AUTHORIZATION),
+            Some(&HeaderValue::from_static("Bearer synthetic-access"))
+        );
+        assert_eq!(
+            headers.get(AUDIENCE_HEADER),
+            Some(&HeaderValue::from_static("urn:example:resource-api"))
+        );
+        let mut response = axum::Json(json!({
+            "iss":"https://identity.example.test",
+            "sub":"subject-1",
+            "aud":"urn:example:resource-api",
+            "iat":4_102_444_500_i64,
+            "nbf":4_102_444_500_i64,
+            "exp":4_102_444_800_i64,
+            "jti":"identity_jti_v1_synthetic",
+            "act":{"sub":"subject-1"},
+            "scope":"resource.read",
+            "principal_kind":"human",
+            "tenant_id":"tenant-1",
+            "email":"person@example.test",
+            "groups":["member"]
+        }))
+        .into_response();
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+            .headers_mut()
+            .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+        response
+    }
+
     async fn token(
         headers: HeaderMap,
         axum::Form(request): axum::Form<std::collections::HashMap<String, String>>,
@@ -553,6 +654,7 @@ mod tests {
                 Router::new()
                     .route("/v1/session-authority", get(authority))
                     .route("/v1/access-token", post(access))
+                    .route("/v1/access-authority", get(access_authority))
                     .route("/oauth/token", post(token)),
             )
             .await
@@ -591,6 +693,20 @@ mod tests {
             format!("{:?}", access.credential),
             "AccessCredential([REDACTED])"
         );
+    }
+
+    #[tokio::test]
+    async fn short_lived_access_authority_is_exact_and_credential_free() {
+        let client = IdentityClient::new(&test_origin().await, "urn:example:console").unwrap();
+        let authority = client
+            .resolve_access_token("Bearer synthetic-access", "urn:example:resource-api")
+            .await
+            .unwrap();
+        assert_eq!(authority.tenant_id, "tenant-1");
+        assert_eq!(authority.subject, "subject-1");
+        assert_eq!(authority.actor.subject, "subject-1");
+        assert_eq!(authority.scope, "resource.read");
+        assert!(!format!("{authority:?}").contains("synthetic-access"));
     }
 
     #[tokio::test]
