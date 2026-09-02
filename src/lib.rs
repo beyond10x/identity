@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Form, Query, State};
+use axum::extract::{DefaultBodyLimit, Form, Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
 use axum::routing::{delete, get, post, put};
@@ -121,10 +121,8 @@ pub struct Config {
     pub web_clients: Vec<WebClient>,
     /// Exact relying-party audiences admitted by this deployment.
     pub audience_registry: AudienceRegistry,
-    pub upstream_issuer: String,
-    pub upstream_client_id: String,
-    pub upstream_client_secret: SecretValue,
-    pub organization_domain_policy: OrganizationDomainPolicy,
+    /// Exact upstream `OpenID Connect` providers admitted by this deployment.
+    pub upstream_providers: Vec<UpstreamProvider>,
     /// Deployment-owned, immediately effective human-to-group assignments.
     pub static_group_memberships: StaticGroupMemberships,
     pub database_url: Option<SecretValue>,
@@ -142,33 +140,40 @@ impl Config {
     /// configuration changes. Secrets are deliberately excluded from this digest.
     fn configuration_generation(&self) -> String {
         let mut digest = Sha256::new();
-        for field in [
-            self.issuer(),
-            &self.tenant_id,
-            &self.cli_client_id,
-            &self.upstream_issuer,
-            self.organization_domain_policy
-                .claim
-                .as_deref()
-                .unwrap_or(""),
-        ] {
+        for field in [self.issuer(), &self.tenant_id, &self.cli_client_id] {
             digest.update((field.len() as u64).to_be_bytes());
             digest.update(field.as_bytes());
         }
-        for domain in &self.organization_domain_policy.allowed_base_domains {
-            digest.update((domain.len() as u64).to_be_bytes());
-            digest.update(domain.as_bytes());
-        }
-        let mut tenant_mappings = self
-            .organization_domain_policy
-            .tenant_by_claim_value
-            .iter()
-            .collect::<Vec<_>>();
-        tenant_mappings.sort();
-        for (claim_value, tenant_id) in tenant_mappings {
-            for field in [claim_value.as_str(), tenant_id.as_str()] {
+        for provider in &self.upstream_providers {
+            for field in [
+                provider.id.as_str(),
+                provider.label.as_str(),
+                provider.issuer.as_str(),
+                provider.client_id.as_str(),
+                provider
+                    .organization_domain_policy
+                    .claim
+                    .as_deref()
+                    .unwrap_or(""),
+            ] {
                 digest.update((field.len() as u64).to_be_bytes());
                 digest.update(field.as_bytes());
+            }
+            for domain in &provider.organization_domain_policy.allowed_base_domains {
+                digest.update((domain.len() as u64).to_be_bytes());
+                digest.update(domain.as_bytes());
+            }
+            let mut tenant_mappings = provider
+                .organization_domain_policy
+                .tenant_by_claim_value
+                .iter()
+                .collect::<Vec<_>>();
+            tenant_mappings.sort();
+            for (claim_value, tenant_id) in tenant_mappings {
+                for field in [claim_value.as_str(), tenant_id.as_str()] {
+                    digest.update((field.len() as u64).to_be_bytes());
+                    digest.update(field.as_bytes());
+                }
             }
         }
         for client in &self.web_clients {
@@ -179,6 +184,37 @@ impl Config {
         }
         self.audience_registry.update_generation(&mut digest);
         hex_digest(&digest.finalize()[..])
+    }
+}
+
+/// One deployment-admitted upstream `OpenID Connect` provider.
+#[derive(Debug, Clone)]
+pub struct UpstreamProvider {
+    pub id: String,
+    pub label: String,
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: SecretValue,
+    pub organization_domain_policy: OrganizationDomainPolicy,
+}
+
+impl UpstreamProvider {
+    fn validate(&self) -> Result<()> {
+        if self.id.is_empty()
+            || self.id.len() > 64
+            || !self
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || self.label.trim().is_empty()
+            || self.label.len() > 128
+            || self.client_id.trim().is_empty()
+            || self.client_id.len() > 512
+        {
+            bail!("upstream provider id, label, or client id is invalid");
+        }
+        IssuerUrl::new(self.issuer.clone()).context("upstream provider issuer URL")?;
+        Ok(())
     }
 }
 
@@ -709,7 +745,7 @@ type UpstreamIdToken = IdToken<
 #[derive(Clone)]
 pub struct AppState {
     config: Arc<Config>,
-    upstream: Arc<CoreProviderMetadata>,
+    upstreams: Arc<BTreeMap<String, CoreProviderMetadata>>,
     http_client: openidconnect::reqwest::Client,
     store: Store,
 }
@@ -718,13 +754,13 @@ impl AppState {
     #[must_use]
     pub fn new(
         config: Arc<Config>,
-        upstream: CoreProviderMetadata,
+        upstreams: BTreeMap<String, CoreProviderMetadata>,
         http_client: openidconnect::reqwest::Client,
         store: Store,
     ) -> Self {
         Self {
             config,
-            upstream: Arc::new(upstream),
+            upstreams: Arc::new(upstreams),
             http_client,
             store,
         }
@@ -778,6 +814,7 @@ async fn initialize_postgres(client: &tokio_postgres::Client) -> Result<()> {
         .batch_execute(
             "CREATE TABLE IF NOT EXISTS login_transactions (
                upstream_state TEXT PRIMARY KEY,
+               provider_id TEXT NOT NULL DEFAULT 'default',
                created_at BIGINT NOT NULL,
                client_id TEXT NOT NULL,
                redirect_uri TEXT NOT NULL,
@@ -787,6 +824,22 @@ async fn initialize_postgres(client: &tokio_postgres::Client) -> Result<()> {
                upstream_nonce TEXT NOT NULL,
                upstream_pkce_verifier TEXT NOT NULL
              );
+             ALTER TABLE login_transactions ADD COLUMN IF NOT EXISTS provider_id TEXT NOT NULL DEFAULT 'default';
+             ALTER TABLE login_transactions ADD COLUMN IF NOT EXISTS link_subject TEXT;
+             ALTER TABLE login_transactions ADD COLUMN IF NOT EXISTS link_tenant_id TEXT;
+             CREATE TABLE IF NOT EXISTS identity_links (
+               tenant_id TEXT NOT NULL,
+               provider_id TEXT NOT NULL,
+               issuer TEXT NOT NULL,
+               upstream_subject TEXT NOT NULL,
+               canonical_subject TEXT NOT NULL,
+               email TEXT,
+               created_at BIGINT NOT NULL,
+               PRIMARY KEY (tenant_id, provider_id, issuer, upstream_subject),
+               UNIQUE (tenant_id, provider_id, canonical_subject)
+             );
+             CREATE INDEX IF NOT EXISTS identity_links_canonical
+               ON identity_links (tenant_id, canonical_subject);
              CREATE TABLE IF NOT EXISTS authorization_codes (
                code_hash BYTEA PRIMARY KEY,
                created_at BIGINT NOT NULL,
@@ -902,12 +955,14 @@ impl Store {
         Self::from_sqlite_connection(Connection::open_in_memory()?)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn from_sqlite_connection(connection: Connection) -> Result<Self> {
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA foreign_keys=ON;
              CREATE TABLE IF NOT EXISTS login_transactions (
                upstream_state TEXT PRIMARY KEY,
+               provider_id TEXT NOT NULL DEFAULT 'default',
                created_at INTEGER NOT NULL,
                client_id TEXT NOT NULL,
                redirect_uri TEXT NOT NULL,
@@ -917,6 +972,19 @@ impl Store {
                upstream_nonce TEXT NOT NULL,
                upstream_pkce_verifier TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS identity_links (
+               tenant_id TEXT NOT NULL,
+               provider_id TEXT NOT NULL,
+               issuer TEXT NOT NULL,
+               upstream_subject TEXT NOT NULL,
+               canonical_subject TEXT NOT NULL,
+               email TEXT,
+               created_at INTEGER NOT NULL,
+               PRIMARY KEY (tenant_id, provider_id, issuer, upstream_subject),
+               UNIQUE (tenant_id, provider_id, canonical_subject)
+             );
+             CREATE INDEX IF NOT EXISTS identity_links_canonical
+               ON identity_links (tenant_id, canonical_subject);
              CREATE TABLE IF NOT EXISTS authorization_codes (
                code_hash BLOB PRIMARY KEY,
                created_at INTEGER NOT NULL,
@@ -960,6 +1028,14 @@ impl Store {
         )?;
         ensure_sqlite_column(
             &connection,
+            "login_transactions",
+            "provider_id",
+            "TEXT NOT NULL DEFAULT 'default'",
+        )?;
+        ensure_sqlite_column(&connection, "login_transactions", "link_subject", "TEXT")?;
+        ensure_sqlite_column(&connection, "login_transactions", "link_tenant_id", "TEXT")?;
+        ensure_sqlite_column(
+            &connection,
             "authorization_codes",
             "tenant_id",
             "TEXT NOT NULL DEFAULT ''",
@@ -1000,11 +1076,13 @@ impl Store {
             Self::Sqlite(_) => {
                 self.sqlite_connection()?.execute(
                     "INSERT INTO login_transactions (
-                       upstream_state, created_at, client_id, redirect_uri, client_state, client_nonce,
-                       client_code_challenge, upstream_nonce, upstream_pkce_verifier
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                       upstream_state, provider_id, created_at, client_id, redirect_uri, client_state,
+                       client_nonce, client_code_challenge, upstream_nonce, upstream_pkce_verifier,
+                       link_subject, link_tenant_id
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     params![
                         login.upstream_state,
+                        login.provider_id,
                         login.created_at,
                         login.client_id,
                         login.redirect_uri,
@@ -1013,6 +1091,8 @@ impl Store {
                         login.client_code_challenge,
                         login.upstream_nonce,
                         login.upstream_pkce_verifier,
+                        login.link_subject,
+                        login.link_tenant_id,
                     ],
                 )?;
             }
@@ -1021,11 +1101,13 @@ impl Store {
                 client
                     .execute(
                         "INSERT INTO login_transactions (
-                           upstream_state, created_at, client_id, redirect_uri, client_state,
-                           client_nonce, client_code_challenge, upstream_nonce, upstream_pkce_verifier
-                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                           upstream_state, provider_id, created_at, client_id, redirect_uri,
+                           client_state, client_nonce, client_code_challenge, upstream_nonce,
+                           upstream_pkce_verifier, link_subject, link_tenant_id
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                         &[
                             &login.upstream_state,
+                            &login.provider_id,
                             &login.created_at,
                             &login.client_id,
                             &login.redirect_uri,
@@ -1034,6 +1116,8 @@ impl Store {
                             &login.client_code_challenge,
                             &login.upstream_nonce,
                             &login.upstream_pkce_verifier,
+                            &login.link_subject,
+                            &login.link_tenant_id,
                         ],
                     )
                     .await?;
@@ -1048,20 +1132,24 @@ impl Store {
                 .sqlite_connection()?
                 .query_row(
                     "DELETE FROM login_transactions WHERE upstream_state = ?1
-                     RETURNING upstream_state, created_at, client_id, redirect_uri, client_state,
-                               client_nonce, client_code_challenge, upstream_nonce, upstream_pkce_verifier",
+                     RETURNING upstream_state, provider_id, created_at, client_id, redirect_uri,
+                               client_state, client_nonce, client_code_challenge, upstream_nonce,
+                               upstream_pkce_verifier, link_subject, link_tenant_id",
                     [state],
                     |row| {
                         Ok(LoginTransaction {
                             upstream_state: row.get(0)?,
-                            created_at: row.get(1)?,
-                            client_id: row.get(2)?,
-                            redirect_uri: row.get(3)?,
-                            client_state: row.get(4)?,
-                            client_nonce: row.get(5)?,
-                            client_code_challenge: row.get(6)?,
-                            upstream_nonce: row.get(7)?,
-                            upstream_pkce_verifier: row.get(8)?,
+                            provider_id: row.get(1)?,
+                            created_at: row.get(2)?,
+                            client_id: row.get(3)?,
+                            redirect_uri: row.get(4)?,
+                            client_state: row.get(5)?,
+                            client_nonce: row.get(6)?,
+                            client_code_challenge: row.get(7)?,
+                            upstream_nonce: row.get(8)?,
+                            upstream_pkce_verifier: row.get(9)?,
+                            link_subject: row.get(10)?,
+                            link_tenant_id: row.get(11)?,
                         })
                     },
                 )
@@ -1069,27 +1157,217 @@ impl Store {
                 .map_err(Into::into),
             Self::Postgres(store) => {
                 let client = store.client().await?;
-                client.query_opt(
-                    "DELETE FROM login_transactions WHERE upstream_state = $1
-                     RETURNING upstream_state, created_at, client_id, redirect_uri, client_state,
-                               client_nonce, client_code_challenge, upstream_nonce, upstream_pkce_verifier",
-                    &[&state],
-                )
-                .await
-                .map(|row| {
-                    row.map(|row| LoginTransaction {
-                        upstream_state: row.get(0),
-                        created_at: row.get(1),
-                        client_id: row.get(2),
-                        redirect_uri: row.get(3),
-                        client_state: row.get(4),
-                        client_nonce: row.get(5),
-                        client_code_challenge: row.get(6),
-                        upstream_nonce: row.get(7),
-                        upstream_pkce_verifier: row.get(8),
+                client
+                    .query_opt(
+                        "DELETE FROM login_transactions WHERE upstream_state = $1
+                     RETURNING upstream_state, provider_id, created_at, client_id, redirect_uri,
+                               client_state, client_nonce, client_code_challenge, upstream_nonce,
+                               upstream_pkce_verifier, link_subject, link_tenant_id",
+                        &[&state],
+                    )
+                    .await
+                    .map(|row| {
+                        row.map(|row| LoginTransaction {
+                            upstream_state: row.get(0),
+                            provider_id: row.get(1),
+                            created_at: row.get(2),
+                            client_id: row.get(3),
+                            redirect_uri: row.get(4),
+                            client_state: row.get(5),
+                            client_nonce: row.get(6),
+                            client_code_challenge: row.get(7),
+                            upstream_nonce: row.get(8),
+                            upstream_pkce_verifier: row.get(9),
+                            link_subject: row.get(10),
+                            link_tenant_id: row.get(11),
+                        })
                     })
-                })
-                .map_err(Into::into)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    async fn resolve_identity_link(
+        &self,
+        tenant_id: &str,
+        provider_id: &str,
+        issuer: &str,
+        upstream_subject: &str,
+    ) -> Result<Option<Identity>> {
+        match self {
+            Self::Sqlite(_) => self
+                .sqlite_connection()?
+                .query_row(
+                    "SELECT canonical_subject, email FROM identity_links
+                     WHERE tenant_id = ?1 AND provider_id = ?2 AND issuer = ?3
+                       AND upstream_subject = ?4",
+                    params![tenant_id, provider_id, issuer, upstream_subject],
+                    |row| {
+                        Ok(Identity {
+                            subject: row.get(0)?,
+                            email: row.get(1)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(Into::into),
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                client
+                    .query_opt(
+                        "SELECT canonical_subject, email FROM identity_links
+                         WHERE tenant_id = $1 AND provider_id = $2 AND issuer = $3
+                           AND upstream_subject = $4",
+                        &[&tenant_id, &provider_id, &issuer, &upstream_subject],
+                    )
+                    .await
+                    .map(|row| {
+                        row.map(|row| Identity {
+                            subject: row.get(0),
+                            email: row.get(1),
+                        })
+                    })
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    async fn put_identity_link(
+        &self,
+        tenant_id: &str,
+        provider_id: &str,
+        issuer: &str,
+        upstream_subject: &str,
+        identity: &Identity,
+        created_at: i64,
+    ) -> Result<bool> {
+        let _capacity_admission = self.capacity_admission().await;
+        match self {
+            Self::Sqlite(_) => self
+                .sqlite_connection()?
+                .execute(
+                    "INSERT INTO identity_links (
+                       tenant_id, provider_id, issuer, upstream_subject, canonical_subject, email,
+                       created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT DO NOTHING",
+                    params![
+                        tenant_id,
+                        provider_id,
+                        issuer,
+                        upstream_subject,
+                        identity.subject,
+                        identity.email,
+                        created_at,
+                    ],
+                )
+                .map(|changed| changed == 1)
+                .map_err(Into::into),
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                client
+                    .execute(
+                        "INSERT INTO identity_links (
+                           tenant_id, provider_id, issuer, upstream_subject, canonical_subject,
+                           email, created_at
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                         ON CONFLICT DO NOTHING",
+                        &[
+                            &tenant_id,
+                            &provider_id,
+                            &issuer,
+                            &upstream_subject,
+                            &identity.subject,
+                            &identity.email,
+                            &created_at,
+                        ],
+                    )
+                    .await
+                    .map(|changed| changed == 1)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    async fn identity_links_for(
+        &self,
+        tenant_id: &str,
+        canonical_subject: &str,
+    ) -> Result<Vec<IdentityLink>> {
+        match self {
+            Self::Sqlite(_) => {
+                let connection = self.sqlite_connection()?;
+                let mut statement = connection.prepare(
+                    "SELECT provider_id, issuer, email, created_at FROM identity_links
+                     WHERE tenant_id = ?1 AND canonical_subject = ?2 ORDER BY provider_id",
+                )?;
+                let rows = statement.query_map(params![tenant_id, canonical_subject], |row| {
+                    Ok(IdentityLink {
+                        provider_id: row.get(0)?,
+                        issuer: row.get(1)?,
+                        email: row.get(2)?,
+                        linked_at: row.get(3)?,
+                    })
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(Into::into)
+            }
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                let rows = client
+                    .query(
+                        "SELECT provider_id, issuer, email, created_at FROM identity_links
+                         WHERE tenant_id = $1 AND canonical_subject = $2 ORDER BY provider_id",
+                        &[&tenant_id, &canonical_subject],
+                    )
+                    .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| IdentityLink {
+                        provider_id: row.get(0),
+                        issuer: row.get(1),
+                        email: row.get(2),
+                        linked_at: row.get(3),
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    async fn remove_identity_link(
+        &self,
+        tenant_id: &str,
+        canonical_subject: &str,
+        provider_id: &str,
+    ) -> Result<bool> {
+        let _capacity_admission = self.capacity_admission().await;
+        let links = self
+            .identity_links_for(tenant_id, canonical_subject)
+            .await?;
+        if links.len() <= 1 {
+            return Ok(false);
+        }
+        match self {
+            Self::Sqlite(_) => self
+                .sqlite_connection()?
+                .execute(
+                    "DELETE FROM identity_links
+                     WHERE tenant_id = ?1 AND canonical_subject = ?2 AND provider_id = ?3",
+                    params![tenant_id, canonical_subject, provider_id],
+                )
+                .map(|changed| changed == 1)
+                .map_err(Into::into),
+            Self::Postgres(store) => {
+                let client = store.client().await?;
+                client
+                    .execute(
+                        "DELETE FROM identity_links
+                         WHERE tenant_id = $1 AND canonical_subject = $2 AND provider_id = $3",
+                        &[&tenant_id, &canonical_subject, &provider_id],
+                    )
+                    .await
+                    .map(|changed| changed == 1)
+                    .map_err(Into::into)
             }
         }
     }
@@ -1694,6 +1972,7 @@ struct RowCap<'a> {
 #[derive(Debug)]
 struct LoginTransaction {
     upstream_state: String,
+    provider_id: String,
     created_at: i64,
     client_id: String,
     redirect_uri: String,
@@ -1702,6 +1981,8 @@ struct LoginTransaction {
     client_code_challenge: String,
     upstream_nonce: String,
     upstream_pkce_verifier: String,
+    link_subject: Option<String>,
+    link_tenant_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1721,6 +2002,21 @@ struct Identity {
     email: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityLink {
+    provider_id: String,
+    issuer: String,
+    email: Option<String>,
+    linked_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityLinkStart {
+    authorization_url: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct AuthorizeQuery {
     response_type: String,
@@ -1731,6 +2027,9 @@ struct AuthorizeQuery {
     nonce: String,
     code_challenge: String,
     code_challenge_method: String,
+    /// Deployment-configured upstream provider id. Required when more than one is configured.
+    #[serde(default)]
+    identity_provider: Option<String>,
     /// The mailbox to sign in as, read only by a loopback development build. A deployed Identity
     /// does not have this field, so the standard parameter is ignored there as any unknown one is.
     #[cfg(feature = "local-login")]
@@ -1919,16 +2218,27 @@ impl IntoResponse for HttpError {
 /// # Errors
 ///
 /// Returns an error for an invalid issuer URL, failed discovery request, or invalid metadata.
-pub async fn discover_upstream(
+pub async fn discover_upstreams(
     config: &Config,
     client: &openidconnect::reqwest::Client,
-) -> Result<CoreProviderMetadata> {
-    CoreProviderMetadata::discover_async(
-        IssuerUrl::new(config.upstream_issuer.clone()).context("upstream issuer URL")?,
-        client,
-    )
-    .await
-    .context("discover upstream OpenID Connect issuer")
+) -> Result<BTreeMap<String, CoreProviderMetadata>> {
+    if config.upstream_providers.is_empty() {
+        bail!("at least one upstream OpenID Connect provider is required");
+    }
+    let mut discovered = BTreeMap::new();
+    for provider in &config.upstream_providers {
+        provider.validate()?;
+        let metadata = CoreProviderMetadata::discover_async(
+            IssuerUrl::new(provider.issuer.clone()).context("upstream issuer URL")?,
+            client,
+        )
+        .await
+        .with_context(|| format!("discover upstream OpenID Connect provider {}", provider.id))?;
+        if discovered.insert(provider.id.clone(), metadata).is_some() {
+            bail!("upstream provider ids must be unique");
+        }
+    }
+    Ok(discovered)
 }
 
 pub fn router(state: AppState) -> Router {
@@ -1944,6 +2254,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/access-token", post(issue_access_token))
         .route("/v1/access-authority", get(verify_access_token))
         .route("/v1/logout", post(logout))
+        .route("/v1/identity-links", get(list_identity_links))
+        .route(
+            "/v1/identity-links/{provider_id}",
+            post(start_identity_link).delete(remove_identity_link),
+        )
         .merge(directory_router())
         .merge(profile_router())
         .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
@@ -2214,16 +2529,52 @@ async fn logout(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn authorize(
+async fn admitted_session_for_link_management(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<AdmittedSession, HttpError> {
+    let audience = requested_audience(headers)
+        .filter(|audience| state.config.audience_registry.admits_session(audience))
+        .ok_or_else(|| HttpError::denied("an exact admitted session audience is required"))?;
+    admitted_session_for_audience(state, headers, audience).await
+}
+
+async fn list_identity_links(
     State(state): State<AppState>,
-    Query(query): Query<AuthorizeQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, HttpError> {
-    validate_authorization_request(&state.config, &query)?;
-    // A loopback development build has no provider to redirect to, and signs the request in itself.
-    #[cfg(feature = "local-login")]
-    if local_login::admitted(&state.config) {
-        return local_login::complete(&state.config, &state.store, &query).await;
+    let admitted = admitted_session_for_link_management(&state, &headers).await?;
+    let links = state
+        .store
+        .identity_links_for(&admitted.tenant_id, &admitted.subject)
+        .await
+        .map_err(HttpError::internal)?;
+    Ok(confidential_json(links))
+}
+
+async fn start_identity_link(
+    State(state): State<AppState>,
+    AxumPath(provider_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    let admitted = admitted_session_for_link_management(&state, &headers).await?;
+    let provider = selected_upstream_provider(&state.config, Some(&provider_id))?;
+    if state
+        .store
+        .identity_links_for(&admitted.tenant_id, &admitted.subject)
+        .await
+        .map_err(HttpError::internal)?
+        .iter()
+        .any(|link| link.provider_id == provider.id)
+    {
+        return Err(HttpError::unprocessable(
+            "this provider is already linked to the current person",
+        ));
     }
+    let metadata = state
+        .upstreams
+        .get(&provider.id)
+        .ok_or_else(|| HttpError::internal("selected upstream provider was not discovered"))?;
     let upstream_state = random_token(32).map_err(HttpError::internal)?;
     let upstream_nonce = random_token(32).map_err(HttpError::internal)?;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
@@ -2233,10 +2584,10 @@ async fn authorize(
         .join("oauth/callback/upstream")
         .map_err(HttpError::internal)?;
     let client = CoreClient::from_provider_metadata(
-        (*state.upstream).clone(),
-        ClientId::new(state.config.upstream_client_id.clone()),
+        metadata.clone(),
+        ClientId::new(provider.client_id.clone()),
         Some(ClientSecret::new(
-            state.config.upstream_client_secret.expose_secret_owned(),
+            provider.client_secret.expose_secret_owned(),
         )),
     )
     .set_redirect_uri(RedirectUrl::new(callback.to_string()).map_err(HttpError::internal)?);
@@ -2260,6 +2611,96 @@ async fn authorize(
         .store
         .put_login(&LoginTransaction {
             upstream_state,
+            provider_id: provider.id.clone(),
+            created_at: unix_time().map_err(HttpError::internal)?,
+            client_id: String::new(),
+            redirect_uri: String::new(),
+            client_state: String::new(),
+            client_nonce: String::new(),
+            client_code_challenge: String::new(),
+            upstream_nonce,
+            upstream_pkce_verifier: verifier.secret().clone(),
+            link_subject: Some(admitted.subject),
+            link_tenant_id: Some(admitted.tenant_id),
+        })
+        .await
+        .map_err(HttpError::internal)?;
+    Ok(confidential_json(IdentityLinkStart {
+        authorization_url: authorization_url.to_string(),
+    }))
+}
+
+async fn remove_identity_link(
+    State(state): State<AppState>,
+    AxumPath(provider_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, HttpError> {
+    let admitted = admitted_session_for_link_management(&state, &headers).await?;
+    if !state
+        .store
+        .remove_identity_link(&admitted.tenant_id, &admitted.subject, &provider_id)
+        .await
+        .map_err(HttpError::internal)?
+    {
+        return Err(HttpError::unprocessable(
+            "the provider is not linked or is the final login method",
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn authorize(
+    State(state): State<AppState>,
+    Query(query): Query<AuthorizeQuery>,
+) -> Result<Response, HttpError> {
+    validate_authorization_request(&state.config, &query)?;
+    // A loopback development build has no provider to redirect to, and signs the request in itself.
+    #[cfg(feature = "local-login")]
+    if local_login::admitted(&state.config) {
+        return local_login::complete(&state.config, &state.store, &query).await;
+    }
+    let provider = selected_upstream_provider(&state.config, query.identity_provider.as_deref())?;
+    let metadata = state
+        .upstreams
+        .get(&provider.id)
+        .ok_or_else(|| HttpError::internal("selected upstream provider was not discovered"))?;
+    let upstream_state = random_token(32).map_err(HttpError::internal)?;
+    let upstream_nonce = random_token(32).map_err(HttpError::internal)?;
+    let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+    let callback = state
+        .config
+        .public_origin
+        .join("oauth/callback/upstream")
+        .map_err(HttpError::internal)?;
+    let client = CoreClient::from_provider_metadata(
+        metadata.clone(),
+        ClientId::new(provider.client_id.clone()),
+        Some(ClientSecret::new(
+            provider.client_secret.expose_secret_owned(),
+        )),
+    )
+    .set_redirect_uri(RedirectUrl::new(callback.to_string()).map_err(HttpError::internal)?);
+    let (authorization_url, _, _) = client
+        .authorize_url(
+            CoreAuthenticationFlow::AuthorizationCode,
+            {
+                let value = upstream_state.clone();
+                move || CsrfToken::new(value)
+            },
+            {
+                let value = upstream_nonce.clone();
+                move || Nonce::new(value)
+            },
+        )
+        .add_scope(Scope::new("email".to_owned()))
+        .add_scope(Scope::new("profile".to_owned()))
+        .set_pkce_challenge(challenge)
+        .url();
+    state
+        .store
+        .put_login(&LoginTransaction {
+            upstream_state,
+            provider_id: provider.id.clone(),
             created_at: unix_time().map_err(HttpError::internal)?,
             client_id: query.client_id,
             redirect_uri: query.redirect_uri,
@@ -2268,6 +2709,8 @@ async fn authorize(
             client_code_challenge: query.code_challenge,
             upstream_nonce,
             upstream_pkce_verifier: verifier.secret().clone(),
+            link_subject: None,
+            link_tenant_id: None,
         })
         .await
         .map_err(HttpError::internal)?;
@@ -2284,6 +2727,7 @@ pub fn local_login_admitted(config: &Config) -> bool {
     local_login::admitted(config)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn upstream_callback(
     State(state): State<AppState>,
     Query(query): Query<UpstreamCallback>,
@@ -2313,16 +2757,26 @@ async fn upstream_callback(
     let code = query
         .code
         .ok_or_else(|| HttpError::invalid("missing authorization code"))?;
+    let provider = state
+        .config
+        .upstream_providers
+        .iter()
+        .find(|provider| provider.id == login.provider_id)
+        .ok_or_else(|| HttpError::denied("login provider is no longer configured"))?;
+    let metadata = state
+        .upstreams
+        .get(&provider.id)
+        .ok_or_else(|| HttpError::internal("login provider was not discovered"))?;
     let callback = state
         .config
         .public_origin
         .join("oauth/callback/upstream")
         .map_err(HttpError::internal)?;
     let client = CoreClient::from_provider_metadata(
-        (*state.upstream).clone(),
-        ClientId::new(state.config.upstream_client_id.clone()),
+        metadata.clone(),
+        ClientId::new(provider.client_id.clone()),
         Some(ClientSecret::new(
-            state.config.upstream_client_secret.expose_secret_owned(),
+            provider.client_secret.expose_secret_owned(),
         )),
     )
     .set_redirect_uri(RedirectUrl::new(callback.to_string()).map_err(HttpError::internal)?);
@@ -2350,6 +2804,10 @@ async fn upstream_callback(
         .map_err(|_| HttpError::denied("upstream ID token validation failed"))?;
     let tenant_id = state
         .config
+        .upstream_providers
+        .iter()
+        .find(|candidate| candidate.id == login.provider_id)
+        .ok_or_else(|| HttpError::denied("login provider is no longer configured"))?
         .organization_domain_policy
         .resolve_tenant(&claims.additional_claims().0, &state.config.tenant_id)
         .ok_or_else(|| {
@@ -2358,9 +2816,121 @@ async fn upstream_callback(
     if claims.email().is_some() && claims.email_verified() != Some(true) {
         return Err(HttpError::denied("upstream email address is not verified"));
     }
-    let identity = Identity {
-        subject: claims.subject().as_str().to_owned(),
-        email: claims.email().map(|email| email.as_str().to_owned()),
+    let upstream_subject = claims.subject().as_str().to_owned();
+    let upstream_email = claims.email().map(|email| email.as_str().to_owned());
+    if let (Some(link_subject), Some(link_tenant_id)) = (
+        login.link_subject.as_deref(),
+        login.link_tenant_id.as_deref(),
+    ) {
+        if link_tenant_id != tenant_id {
+            return Err(HttpError::denied(
+                "the linked identity resolved to a different tenant",
+            ));
+        }
+        if let Some(existing) = state
+            .store
+            .resolve_identity_link(
+                &tenant_id,
+                &provider.id,
+                &provider.issuer,
+                &upstream_subject,
+            )
+            .await
+            .map_err(HttpError::internal)?
+        {
+            if existing.subject != link_subject {
+                return Err(HttpError::denied(
+                    "this upstream identity is already linked to another person",
+                ));
+            }
+        } else {
+            let linked = state
+                .store
+                .put_identity_link(
+                    &tenant_id,
+                    &provider.id,
+                    &provider.issuer,
+                    &upstream_subject,
+                    &Identity {
+                        subject: link_subject.to_owned(),
+                        email: upstream_email,
+                    },
+                    unix_time().map_err(HttpError::internal)?,
+                )
+                .await
+                .map_err(HttpError::internal)?;
+            if !linked {
+                return Err(HttpError::denied(
+                    "this provider is already linked or belongs to another person",
+                ));
+            }
+        }
+        return Ok(Html(
+            "<!doctype html><title>Identity linked</title><h1>Identity linked</h1><p>You can return to Devcenter.</p>"
+                .to_owned(),
+        )
+        .into_response());
+    }
+    let identity = if let Some(linked) = state
+        .store
+        .resolve_identity_link(
+            &tenant_id,
+            &provider.id,
+            &provider.issuer,
+            &upstream_subject,
+        )
+        .await
+        .map_err(HttpError::internal)?
+    {
+        linked
+    } else {
+        let subject = if state
+            .config
+            .upstream_providers
+            .first()
+            .map(|entry| &entry.id)
+            == Some(&provider.id)
+        {
+            // The first configured provider is the legacy provider. Retaining its upstream
+            // subject preserves every resource already keyed by (tenant, subject).
+            upstream_subject.clone()
+        } else {
+            format!(
+                "identity_person_v1_{}",
+                random_token(24).map_err(HttpError::internal)?
+            )
+        };
+        let identity = Identity {
+            subject,
+            email: upstream_email,
+        };
+        if state
+            .store
+            .put_identity_link(
+                &tenant_id,
+                &provider.id,
+                &provider.issuer,
+                &upstream_subject,
+                &identity,
+                unix_time().map_err(HttpError::internal)?,
+            )
+            .await
+            .map_err(HttpError::internal)?
+        {
+            identity
+        } else {
+            state
+                .store
+                .resolve_identity_link(
+                    &tenant_id,
+                    &provider.id,
+                    &provider.issuer,
+                    &upstream_subject,
+                )
+                .await
+                .map_err(HttpError::internal)?
+                .ok_or_else(|| HttpError::denied("upstream identity could not be linked"))?
+        }
     };
     let client_code = random_token(32).map_err(HttpError::internal)?;
     state
@@ -2483,6 +3053,26 @@ fn validate_authorization_request(
         ));
     }
     Ok(())
+}
+
+fn selected_upstream_provider<'a>(
+    config: &'a Config,
+    requested: Option<&str>,
+) -> Result<&'a UpstreamProvider, HttpError> {
+    if let Some(requested) = requested {
+        return config
+            .upstream_providers
+            .iter()
+            .find(|provider| provider.id == requested)
+            .ok_or_else(|| HttpError::invalid("identity_provider is not configured"));
+    }
+    match config.upstream_providers.as_slice() {
+        [provider] => Ok(provider),
+        [] => Err(HttpError::internal("no upstream provider is configured")),
+        _ => Err(HttpError::invalid(
+            "identity_provider is required when multiple providers are configured",
+        )),
+    }
 }
 
 fn validate_loopback_redirect(value: &str) -> Result<(), HttpError> {
@@ -2699,10 +3289,14 @@ mod tests {
                 .unwrap(),
             ],
             audience_registry: audience_registry(),
-            upstream_issuer: "https://accounts.example.test".to_owned(),
-            upstream_client_id: "upstream-client".to_owned(),
-            upstream_client_secret: SecretValue::new("not-a-real-secret".to_owned()),
-            organization_domain_policy: OrganizationDomainPolicy::default(),
+            upstream_providers: vec![UpstreamProvider {
+                id: "default".to_owned(),
+                label: "Example".to_owned(),
+                issuer: "https://accounts.example.test".to_owned(),
+                client_id: "upstream-client".to_owned(),
+                client_secret: SecretValue::new("not-a-real-secret".to_owned()),
+                organization_domain_policy: OrganizationDomainPolicy::default(),
+            }],
             static_group_memberships: StaticGroupMemberships::new(vec![(
                 "tenant-dev".to_owned(),
                 "operator@example.test".to_owned(),
@@ -2776,9 +3370,93 @@ mod tests {
             nonce: random_token(32).unwrap(),
             code_challenge: pkce_challenge(&"a".repeat(64)),
             code_challenge_method: "S256".to_owned(),
+            identity_provider: None,
             #[cfg(feature = "local-login")]
             login_hint: None,
         }
+    }
+
+    #[test]
+    fn upstream_provider_selection_is_explicit_when_the_registry_has_choices() {
+        let mut config = config();
+        config.upstream_providers.push(UpstreamProvider {
+            id: "second".to_owned(),
+            label: "Second".to_owned(),
+            issuer: "https://second.example.test".to_owned(),
+            client_id: "second-client".to_owned(),
+            client_secret: SecretValue::new("second-secret".to_owned()),
+            organization_domain_policy: OrganizationDomainPolicy::default(),
+        });
+        assert!(selected_upstream_provider(&config, None).is_err());
+        assert_eq!(
+            selected_upstream_provider(&config, Some("second"))
+                .unwrap()
+                .issuer,
+            "https://second.example.test"
+        );
+        assert!(selected_upstream_provider(&config, Some("missing")).is_err());
+    }
+
+    #[tokio::test]
+    async fn external_identities_are_explicitly_linked_and_the_last_link_is_retained() {
+        let store = Store::in_memory().unwrap();
+        let identity = Identity {
+            subject: "canonical-person".to_owned(),
+            email: Some("person@example.test".to_owned()),
+        };
+        assert!(
+            store
+                .put_identity_link(
+                    "tenant-dev",
+                    "gitlab",
+                    "https://gitlab.example.test",
+                    "gitlab-subject",
+                    &identity,
+                    1,
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .resolve_identity_link(
+                    "tenant-dev",
+                    "gitlab",
+                    "https://gitlab.example.test",
+                    "gitlab-subject",
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .subject,
+            "canonical-person"
+        );
+        assert!(
+            !store
+                .remove_identity_link("tenant-dev", "canonical-person", "gitlab")
+                .await
+                .unwrap(),
+            "the final login method must not be removed"
+        );
+        assert!(
+            store
+                .put_identity_link(
+                    "tenant-dev",
+                    "slack",
+                    "https://slack.com",
+                    "slack-subject",
+                    &identity,
+                    2,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .remove_identity_link("tenant-dev", "canonical-person", "slack")
+                .await
+                .unwrap()
+        );
     }
 
     /// A hosted Identity is defined by the two facts a deployment cannot avoid: it listens on a

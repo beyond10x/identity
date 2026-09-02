@@ -57,6 +57,23 @@ pub struct SessionAuthority {
     pub groups: Vec<String>,
 }
 
+/// One upstream sign-in identity explicitly linked to the current person.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityLink {
+    pub provider_id: String,
+    pub issuer: String,
+    pub email: Option<String>,
+    pub linked_at: i64,
+}
+
+/// Browser destination for completing an authenticated identity-link operation.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityLinkStart {
+    pub authorization_url: String,
+}
+
 /// An opaque Identity session credential. Its allocation is wiped on drop and diagnostics never
 /// expose it.
 #[derive(Clone)]
@@ -326,7 +343,81 @@ impl IdentityClient {
         })
     }
 
-    fn endpoint(&self, path: &'static str) -> Result<Url, ClientError> {
+    /// Lists the upstream identities explicitly linked to this session's person.
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the authenticated request is refused or unavailable.
+    pub async fn identity_links(
+        &self,
+        session_authorization: &str,
+    ) -> Result<Vec<IdentityLink>, ClientError> {
+        let authorization = HeaderValue::from_str(session_authorization)
+            .map_err(|_| ClientError::Configuration("authorization header is malformed"))?;
+        let response = self
+            .http
+            .get(self.endpoint("v1/identity-links")?)
+            .header(AUTHORIZATION, authorization)
+            .header(AUDIENCE_HEADER, &self.audience)
+            .send()
+            .await
+            .map_err(ClientError::Transport)?;
+        require_confidential(&response)?;
+        decode_status(response).await
+    }
+
+    /// Starts an upstream browser flow that links one provider to the authenticated person.
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the provider or authenticated session is refused.
+    pub async fn start_identity_link(
+        &self,
+        session_authorization: &str,
+        provider_id: &str,
+    ) -> Result<IdentityLinkStart, ClientError> {
+        let authorization = HeaderValue::from_str(session_authorization)
+            .map_err(|_| ClientError::Configuration("authorization header is malformed"))?;
+        let path = format!("v1/identity-links/{provider_id}");
+        let response = self
+            .http
+            .post(self.endpoint(&path)?)
+            .header(AUTHORIZATION, authorization)
+            .header(AUDIENCE_HEADER, &self.audience)
+            .send()
+            .await
+            .map_err(ClientError::Transport)?;
+        require_confidential(&response)?;
+        decode_status(response).await
+    }
+
+    /// Removes one linked provider while refusing to remove the final login method.
+    /// # Errors
+    ///
+    /// Returns [`ClientError`] when the link cannot be removed or is the final login method.
+    pub async fn remove_identity_link(
+        &self,
+        session_authorization: &str,
+        provider_id: &str,
+    ) -> Result<(), ClientError> {
+        let authorization = HeaderValue::from_str(session_authorization)
+            .map_err(|_| ClientError::Configuration("authorization header is malformed"))?;
+        let path = format!("v1/identity-links/{provider_id}");
+        let response = self
+            .http
+            .delete(self.endpoint(&path)?)
+            .header(AUTHORIZATION, authorization)
+            .header(AUDIENCE_HEADER, &self.audience)
+            .send()
+            .await
+            .map_err(ClientError::Transport)?;
+        match response.status().as_u16() {
+            204 => Ok(()),
+            401 => Err(ClientError::Unauthorized),
+            403 => Err(ClientError::Forbidden),
+            status => Err(ClientError::UnexpectedStatus(status)),
+        }
+    }
+
+    fn endpoint(&self, path: &str) -> Result<Url, ClientError> {
         self.origin
             .join(path)
             .map_err(|_| ClientError::Configuration("Identity endpoint path is invalid"))

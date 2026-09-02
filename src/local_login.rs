@@ -77,7 +77,10 @@ pub(crate) async fn complete(
     // The deployment's own tenant resolution, consulted with no upstream claims at all: a
     // deployment that requires an organization claim therefore resolves nothing and refuses.
     let tenant_id = config
-        .organization_domain_policy
+        .upstream_providers
+        .first()
+        .map(|provider| &provider.organization_domain_policy)
+        .ok_or_else(|| HttpError::internal("no upstream provider configuration"))?
         .resolve_tenant(&HashMap::new(), &config.tenant_id)
         .ok_or_else(|| {
             HttpError::denied("this Identity resolves a tenant from a verified upstream claim")

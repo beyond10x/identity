@@ -9,7 +9,8 @@ use anyhow::{Context, Result, bail};
 use axum::Router;
 use identity::{
     AccessAudiencePolicy, AppState, AudienceRegistry, Config, OrganizationDomainPolicy,
-    SecretValue, StaticGroupMemberships, Store, WebClient, discover_upstream, router,
+    SecretValue, StaticGroupMemberships, Store, UpstreamProvider, WebClient, discover_upstreams,
+    router,
 };
 use serde::Deserialize;
 use tracing::info;
@@ -43,12 +44,12 @@ async fn main() -> Result<()> {
         .timeout(Duration::from_secs(15))
         .build()
         .context("build OIDC HTTP client")?;
-    let upstream = discover_upstream(&config, &http_client).await?;
+    let upstreams = discover_upstreams(&config, &http_client).await?;
     let store = match config.database_url.as_ref() {
         Some(url) => Store::connect_postgres(url.expose_secret()).await?,
         None => Store::open(&config.database_path)?,
     };
-    let app: Router = router(AppState::new(config.clone(), upstream, http_client, store));
+    let app: Router = router(AppState::new(config.clone(), upstreams, http_client, store));
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("bind {}", config.listen))?;
@@ -82,10 +83,7 @@ fn config_from_environment() -> Result<Config> {
             .unwrap_or_else(|_| "identity-cli".to_owned()),
         web_clients: web_clients()?,
         audience_registry: audience_registry()?,
-        upstream_issuer: required_issuer("IDENTITY_UPSTREAM_ISSUER")?,
-        upstream_client_id: required("IDENTITY_UPSTREAM_CLIENT_ID")?,
-        upstream_client_secret: required_secret("IDENTITY_UPSTREAM_CLIENT_SECRET")?,
-        organization_domain_policy: organization_domain_policy()?,
+        upstream_providers: upstream_providers()?,
         static_group_memberships: static_group_memberships()?,
         database_url: optional_database_url()?,
         database_path: PathBuf::from(
@@ -93,6 +91,89 @@ fn config_from_environment() -> Result<Config> {
                 .unwrap_or_else(|_| "/var/lib/identity/identity.sqlite3".to_owned()),
         ),
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpstreamProviderEnvironmentConfig {
+    id: String,
+    label: String,
+    issuer: String,
+    client_id: String,
+    client_secret_env: String,
+    #[serde(default)]
+    organization_domain_claim: Option<String>,
+    #[serde(default)]
+    allowed_organization_base_domains: Vec<String>,
+    #[serde(default)]
+    organization_tenants: Vec<OrganizationTenantConfig>,
+}
+
+fn upstream_providers() -> Result<Vec<UpstreamProvider>> {
+    let source = env::var("IDENTITY_UPSTREAM_PROVIDERS_JSON")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let Some(source) = source else {
+        return Ok(vec![UpstreamProvider {
+            id: "default".to_owned(),
+            label: "OpenID Connect".to_owned(),
+            issuer: required_issuer("IDENTITY_UPSTREAM_ISSUER")?,
+            client_id: required("IDENTITY_UPSTREAM_CLIENT_ID")?,
+            client_secret: required_secret("IDENTITY_UPSTREAM_CLIENT_SECRET")?,
+            organization_domain_policy: organization_domain_policy()?,
+        }]);
+    };
+    let entries: Vec<UpstreamProviderEnvironmentConfig> = serde_json::from_str(&source)
+        .context("IDENTITY_UPSTREAM_PROVIDERS_JSON must be an array of provider declarations")?;
+    if entries.is_empty() {
+        bail!("IDENTITY_UPSTREAM_PROVIDERS_JSON must contain at least one provider");
+    }
+    entries
+        .into_iter()
+        .map(|entry| {
+            let policy = if entry.organization_tenants.is_empty() {
+                OrganizationDomainPolicy::new(
+                    entry.organization_domain_claim,
+                    entry.allowed_organization_base_domains,
+                )?
+            } else {
+                if !entry.allowed_organization_base_domains.is_empty() {
+                    bail!("provider organization tenants and allowed base domains are mutually exclusive");
+                }
+                let claim = entry.organization_domain_claim.context(
+                    "provider organizationTenants requires organizationDomainClaim",
+                )?;
+                OrganizationDomainPolicy::exact_tenant_mapping(
+                    &claim,
+                    entry
+                        .organization_tenants
+                        .into_iter()
+                        .map(|mapping| (mapping.claim_value, mapping.tenant_id))
+                        .collect(),
+                )?
+            };
+            if entry.client_secret_env.is_empty()
+                || entry.client_secret_env.len() > 128
+                || !entry
+                    .client_secret_env
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+            {
+                bail!("provider clientSecretEnv must name a bounded uppercase environment variable");
+            }
+            let client_secret = env::var(&entry.client_secret_env).with_context(|| {
+                format!("{} is required for upstream provider {}", entry.client_secret_env, entry.id)
+            })?;
+            Ok(UpstreamProvider {
+                id: entry.id,
+                label: entry.label,
+                issuer: entry.issuer,
+                client_id: entry.client_id,
+                client_secret: SecretValue::new(client_secret),
+                organization_domain_policy: policy,
+            })
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]

@@ -86,6 +86,21 @@ IDENTITY_DATABASE_PATH=/tmp/identity/private/identity.sqlite3 \
 cargo run --locked
 ```
 
+The three `IDENTITY_UPSTREAM_*` variables remain the single-provider compatibility surface. A
+deployment with several providers instead supplies a credential-free registry whose
+`clientSecretEnv` entries name separately injected environment variables:
+
+```bash
+IDENTITY_UPSTREAM_PROVIDERS_JSON='[{"id":"one","label":"Provider one","issuer":"https://accounts.example.com","clientId":"client-one","clientSecretEnv":"IDENTITY_PROVIDER_ONE_SECRET","organizationDomainClaim":"organization","organizationTenants":[{"claimValue":"example.com","tenantId":"local"}]}]'
+```
+
+Provider ids are selected through the standard authorization request's `identity_provider`
+parameter. When more than one provider is configured, omitting the selection is refused. Login
+state binds the provider id, so a callback code can be exchanged only against the issuer and client
+that started it. Additional identities are linked only from a live Identity session through
+`/v1/identity-links`; email equality never links people and the final login method cannot be
+removed.
+
 Production configuration refuses a non-HTTPS public origin; plain HTTP is accepted only for the
 literal `127.0.0.1` local-test origin.
 
@@ -126,6 +141,8 @@ refuse it in a deployment, and any one of them is sufficient**:
 | `GET /v1/session-authority` | an allowlisted in-cluster caller resolves the current session |
 | `POST /v1/access-token`, `GET /v1/access-authority` | mint and resolve a five-minute audience-scoped access token |
 | `POST /v1/logout` | revokes the session and every outstanding access token for that subject |
+| `GET /v1/identity-links` | lists the current person's explicitly linked upstream identities |
+| `POST`, `DELETE /v1/identity-links/{provider_id}` | starts an authenticated link flow or removes a non-final link |
 | `/v1/directory/…` | memberships and groups |
 | `/v1/profile/…` | the personal collaboration profile |
 

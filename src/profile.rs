@@ -1702,10 +1702,14 @@ mod tests {
                 Vec::new(),
             )
             .unwrap(),
-            upstream_issuer: "https://accounts.example.test".to_owned(),
-            upstream_client_id: "upstream-client".to_owned(),
-            upstream_client_secret: crate::SecretValue::new("not-a-real-secret".to_owned()),
-            organization_domain_policy: crate::OrganizationDomainPolicy::default(),
+            upstream_providers: vec![crate::UpstreamProvider {
+                id: "default".to_owned(),
+                label: "Example".to_owned(),
+                issuer: "https://accounts.example.test".to_owned(),
+                client_id: "upstream-client".to_owned(),
+                client_secret: crate::SecretValue::new("not-a-real-secret".to_owned()),
+                organization_domain_policy: crate::OrganizationDomainPolicy::default(),
+            }],
             static_group_memberships: crate::StaticGroupMemberships::new(vec![(
                 TENANT.to_owned(),
                 "person@example.test".to_owned(),
