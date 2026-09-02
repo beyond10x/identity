@@ -8,10 +8,10 @@ actual=$(cargo tree --locked --prefix none --format '{p}' -i rsa@0.9.10)
 expected=$(printf '%s\n' \
   'rsa v0.9.10' \
   'openidconnect v4.0.1' \
-  'identity v0.5.1')
+  'identity v0.5.2')
 
 # The final package path is machine-local, so compare its stable name/version separately.
-actual=$(printf '%s\n' "$actual" | sed 's#identity v0.5.1 (.*)#identity v0.5.1#')
+actual=$(printf '%s\n' "$actual" | sed 's#identity v0.5.2 (.*)#identity v0.5.2#')
 if [ "$actual" != "$expected" ]; then
   printf 'RUSTSEC-2023-0071 dependency path changed; re-review the exception:\n%s\n' "$actual" >&2
   exit 1
