@@ -95,9 +95,10 @@ IDENTITY_UPSTREAM_PROVIDERS_JSON='[{"id":"one","label":"Provider one","issuer":"
 ```
 
 Provider ids are selected through the standard authorization request's `identity_provider`
-parameter. When more than one provider is configured, omitting the selection is refused. Login
-state binds the provider id, so a callback code can be exchanged only against the issuer and client
-that started it. Additional identities are linked only from a live Identity session through
+parameter. When more than one provider is configured, a browser request that omits the selection
+receives an Identity-owned chooser preserving the exact authorization request; an explicit unknown
+selection is refused. Login state binds the provider id, so a callback code can be exchanged only
+against the issuer and client that started it. Additional identities are linked only from a live Identity session through
 `/v1/identity-links`; email equality never links people and the final login method cannot be
 removed.
 
@@ -137,7 +138,8 @@ refuse it in a deployment, and any one of them is sufficient**:
 | `GET /livez` | process liveness only |
 | `GET /readyz`, `GET /healthz` | executes a database query; `503` when durable state is unavailable |
 | `GET /.well-known/identity-cli-login` | Identity-only login and access-token endpoint metadata |
-| `GET /oauth/authorize`, `GET /oauth/callback/upstream`, `POST /oauth/token` | the browser leg and the one-use code exchange |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata for public PKCE clients |
+| `GET /oauth/authorize`, `GET /oauth/callback/upstream`, `POST /oauth/token` | the browser leg and the one-use code exchange; a registered RFC 8707 resource yields its short-lived access token directly |
 | `GET /v1/session-authority` | an allowlisted in-cluster caller resolves the current session |
 | `POST /v1/access-token`, `GET /v1/access-authority` | mint and resolve a five-minute audience-scoped access token |
 | `POST /v1/logout` | revokes the session and every outstanding access token for that subject |
@@ -156,7 +158,7 @@ the relying parties have released the same exact byte.
 
 | audience | reached by |
 |---|---|
-| a registered access audience | an authenticated client, via `POST /v1/access-token`; the exact relying party resolves it at `GET /v1/access-authority` |
+| a registered access audience | an authenticated session via `POST /v1/access-token`, or a public PKCE client through `/oauth/authorize` with the exact `resource`; the relying party resolves either credential at `GET /v1/access-authority` |
 | a registered session audience | an in-cluster application, in the `x-b10x-audience` header on `GET /v1/session-authority` |
 | `urn:b10x:directory` | every `/v1/directory/…` route, in `x-b10x-audience` |
 | `urn:b10x:profile` | the person's own control surface |
@@ -183,6 +185,12 @@ of those bytes and every operation-level authorization decision. Unknown version
 duplicate identifiers or rules, malformed names, unregistered audiences and unregistered scopes are
 refused. The canonical registry contributes to the session configuration generation, so changing it
 requires a new login.
+
+The standard authorization-server document deliberately advertises no dynamic client registration.
+A deployment registers one public client ID; its loopback callback accepts an ephemeral port, and
+PKCE S256 is mandatory. An OAuth resource authorization never creates a reusable browser session:
+the one-use code is bound to its exact registered audience and scope and exchanges directly for the
+same five-minute access-token authority used by `/v1/access-token`.
 
 The person may see exactly what a consumer is given; a consumer may see nothing else.
 
