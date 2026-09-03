@@ -125,6 +125,10 @@ pub struct Config {
     pub upstream_providers: Vec<UpstreamProvider>,
     /// Deployment-owned, immediately effective human-to-group assignments.
     pub static_group_memberships: StaticGroupMemberships,
+    /// Confidential service callers admitted to perform one exact access-token exchange.
+    pub trusted_access_callers: Vec<TrustedAccessCaller>,
+    /// Deployment-owned source-to-target exchange policy. Empty keeps the seam disabled.
+    pub access_exchange_policies: Vec<AccessExchangePolicy>,
     pub database_url: Option<SecretValue>,
     pub database_path: PathBuf,
 }
@@ -183,7 +187,99 @@ impl Config {
             }
         }
         self.audience_registry.update_generation(&mut digest);
+        let mut policies = self.access_exchange_policies.clone();
+        policies.sort();
+        for policy in policies {
+            for field in [
+                policy.caller_id.as_str(),
+                policy.source_audience.as_str(),
+                policy.target_audience.as_str(),
+            ] {
+                update_generation_field(&mut digest, field);
+            }
+            for scope in policy.required_source_scopes {
+                update_generation_field(&mut digest, "exchange-source-scope");
+                update_generation_field(&mut digest, &scope);
+            }
+            for scope in policy.allowed_target_scopes {
+                update_generation_field(&mut digest, "exchange-target-scope");
+                update_generation_field(&mut digest, &scope);
+            }
+        }
         hex_digest(&digest.finalize()[..])
+    }
+}
+
+/// One confidential service caller. The secret is deployment material and is never serialized.
+#[derive(Debug, Clone)]
+pub struct TrustedAccessCaller {
+    id: String,
+    secret: SecretValue,
+}
+
+impl TrustedAccessCaller {
+    /// Validates a bounded caller identifier and a high-entropy deployment secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed identifiers or secrets shorter than 32 bytes.
+    pub fn new(id: String, secret: SecretValue) -> Result<Self> {
+        if !(3..=128).contains(&id.len())
+            || !id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+            || !(32..=1024).contains(&secret.expose_secret().len())
+        {
+            bail!("Identity trusted access caller is malformed");
+        }
+        Ok(Self { id, secret })
+    }
+}
+
+/// One exact, confidentially invoked source-to-target access exchange policy.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AccessExchangePolicy {
+    caller_id: String,
+    source_audience: String,
+    required_source_scopes: BTreeSet<String>,
+    target_audience: String,
+    allowed_target_scopes: BTreeSet<String>,
+}
+
+impl AccessExchangePolicy {
+    /// Builds a policy from exact audiences and scope names.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed identifiers, audiences, or empty scope sets.
+    pub fn new(
+        caller_id: String,
+        source_audience: String,
+        required_source_scopes: Vec<String>,
+        target_audience: String,
+        allowed_target_scopes: Vec<String>,
+    ) -> Result<Self> {
+        if !(3..=128).contains(&caller_id.len())
+            || !caller_id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')
+            })
+        {
+            bail!("Identity access exchange caller id is malformed");
+        }
+        let source_audience = validate_audience(source_audience)?;
+        let target_audience = validate_audience(target_audience)?;
+        let required_source_scopes = normalize_registered_scopes(required_source_scopes)?;
+        let allowed_target_scopes = normalize_registered_scopes(allowed_target_scopes)?;
+        if required_source_scopes.is_empty() || allowed_target_scopes.is_empty() {
+            bail!("Identity access exchange scope sets cannot be empty");
+        }
+        Ok(Self {
+            caller_id,
+            source_audience,
+            required_source_scopes,
+            target_audience,
+            allowed_target_scopes,
+        })
     }
 }
 
@@ -2191,6 +2287,14 @@ struct AccessTokenRequest {
     scope: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccessExchangeRequest {
+    source_audience: String,
+    audience: String,
+    scope: String,
+}
+
 #[derive(Debug, Serialize)]
 struct AccessTokenResponse {
     access_token: String,
@@ -2346,6 +2450,7 @@ pub fn router(state: AppState) -> Router {
         .route("/oauth/token", post(exchange_token))
         .route("/v1/session-authority", get(session_authority))
         .route("/v1/access-token", post(issue_access_token))
+        .route("/v1/access-exchange", post(exchange_access_token))
         .route("/v1/access-authority", get(verify_access_token))
         .route("/v1/logout", post(logout))
         .route("/v1/identity-links", get(list_identity_links))
@@ -2520,6 +2625,87 @@ async fn issue_access_token(
         admitted.tenant_id,
         admitted.subject,
         admitted.email,
+    )
+    .await
+}
+
+async fn exchange_access_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AccessExchangeRequest>,
+) -> Result<Response, HttpError> {
+    let caller_id = headers
+        .get("x-b10x-access-exchange-caller")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| HttpError::denied("a confidential exchange caller is required"))?;
+    let supplied_secret = headers
+        .get("x-b10x-access-exchange-secret")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| HttpError::denied("a confidential exchange caller is required"))?;
+    let caller = state
+        .config
+        .trusted_access_callers
+        .iter()
+        .find(|caller| caller.id == caller_id)
+        .filter(|caller| constant_time_secret_eq(caller.secret.expose_secret(), supplied_secret))
+        .ok_or_else(|| HttpError::denied("the confidential exchange caller was refused"))?;
+
+    let requested_target_scopes = canonical_requested_scopes(&request.scope)?;
+    let policy = state
+        .config
+        .access_exchange_policies
+        .iter()
+        .find(|policy| {
+            policy.caller_id == caller.id
+                && policy.source_audience == request.source_audience
+                && policy.target_audience == request.audience
+                && requested_target_scopes
+                    .iter()
+                    .all(|scope| policy.allowed_target_scopes.contains(*scope))
+        })
+        .ok_or_else(|| HttpError::forbidden("the requested access exchange is not admitted"))?;
+    if state
+        .config
+        .audience_registry
+        .access_policy(&request.source_audience)
+        .is_none()
+        || state
+            .config
+            .audience_registry
+            .access_policy(&request.audience)
+            .is_none()
+    {
+        return Err(HttpError::forbidden(
+            "the requested access exchange audiences are not registered",
+        ));
+    }
+    let source_credential = bearer(&headers, valid_access_credential)
+        .ok_or_else(|| HttpError::denied("a valid source access token is required"))?;
+    let source = state
+        .store
+        .resolve_access_token(source_credential, &request.source_audience)
+        .await
+        .map_err(HttpError::internal)?
+        .ok_or_else(|| HttpError::denied("the source access token is expired or revoked"))?;
+    let source_scopes = canonical_requested_scopes(&source.scope)?;
+    if source.principal_kind != "human"
+        || source.act.sub != source.sub
+        || !policy
+            .required_source_scopes
+            .iter()
+            .all(|scope| source_scopes.contains(scope.as_str()))
+    {
+        return Err(HttpError::forbidden(
+            "the source authority does not admit this exchange",
+        ));
+    }
+    mint_access_token(
+        &state,
+        request.audience,
+        &request.scope,
+        source.tenant_id,
+        source.sub,
+        source.email,
     )
     .await
 }
@@ -3396,6 +3582,18 @@ fn hash(value: &str) -> Vec<u8> {
     Sha256::digest(value.as_bytes()).to_vec()
 }
 
+fn constant_time_secret_eq(expected: &str, supplied: &str) -> bool {
+    let expected = Sha256::digest(expected.as_bytes());
+    let supplied = Sha256::digest(supplied.as_bytes());
+    expected
+        .iter()
+        .zip(supplied.iter())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
 fn ensure_sqlite_column(
     connection: &Connection,
     table: &str,
@@ -3519,6 +3717,8 @@ mod tests {
                 vec!["operator".to_owned()],
             )])
             .unwrap(),
+            trusted_access_callers: Vec::new(),
+            access_exchange_policies: Vec::new(),
             database_url: None,
             database_path: PathBuf::new(),
         }
@@ -4126,6 +4326,138 @@ mod tests {
         assert_eq!(authority.sub, "upstream-subject");
         assert_eq!(authority.groups, vec!["operator"]);
         assert!(store.take_code("resource-code").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn confidential_exchange_preserves_subject_and_narrows_exact_authority() {
+        let store = Store::in_memory().unwrap();
+        let target_audience = "urn:example:target-api";
+        let caller_secret = "exchange-secret-with-at-least-thirty-two-bytes";
+        let mut configured = config();
+        configured.audience_registry = AudienceRegistry::new(
+            vec![
+                TEST_STATUS_AUDIENCE.to_owned(),
+                TEST_ZWIRN_AUDIENCE.to_owned(),
+            ],
+            vec![
+                (TEST_ACCESS_AUDIENCE.to_owned(), access_policy()),
+                (
+                    target_audience.to_owned(),
+                    AccessAudiencePolicy::new(
+                        vec!["target.read".to_owned()],
+                        vec![("operator".to_owned(), vec!["target.invoke".to_owned()])],
+                    )
+                    .unwrap(),
+                ),
+            ],
+        )
+        .unwrap();
+        configured.trusted_access_callers = vec![
+            TrustedAccessCaller::new(
+                "service-a".to_owned(),
+                SecretValue::new(caller_secret.to_owned()),
+            )
+            .unwrap(),
+        ];
+        configured.access_exchange_policies = vec![
+            AccessExchangePolicy::new(
+                "service-a".to_owned(),
+                TEST_ACCESS_AUDIENCE.to_owned(),
+                vec!["resource.read".to_owned()],
+                target_audience.to_owned(),
+                vec!["target.read".to_owned(), "target.invoke".to_owned()],
+            )
+            .unwrap(),
+        ];
+        let now = unix_time().unwrap();
+        let source_credential = format!("identity_access_v1_{}", "s".repeat(43));
+        store
+            .put_access_token(
+                &source_credential,
+                &AccessAuthority {
+                    iss: configured.issuer().to_owned(),
+                    sub: "upstream-subject".to_owned(),
+                    aud: TEST_ACCESS_AUDIENCE.to_owned(),
+                    iat: now,
+                    nbf: now,
+                    exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
+                    jti: "identity_jti_v1_exchange-source".to_owned(),
+                    act: Actor {
+                        sub: "upstream-subject".to_owned(),
+                    },
+                    scope: "resource.read".to_owned(),
+                    principal_kind: "human".to_owned(),
+                    tenant_id: "tenant-dev".to_owned(),
+                    email: Some("operator@example.test".to_owned()),
+                    groups: vec!["stale-group-is-not-forwarded".to_owned()],
+                },
+            )
+            .await
+            .unwrap();
+        let state = AppState::new(
+            Arc::new(configured),
+            BTreeMap::new(),
+            openidconnect::reqwest::ClientBuilder::new()
+                .redirect(openidconnect::reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            store.clone(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {source_credential}")).unwrap(),
+        );
+        headers.insert(
+            "x-b10x-access-exchange-caller",
+            HeaderValue::from_static("service-a"),
+        );
+        headers.insert(
+            "x-b10x-access-exchange-secret",
+            HeaderValue::from_str(caller_secret).unwrap(),
+        );
+        let response = exchange_access_token(
+            State(state.clone()),
+            headers.clone(),
+            Json(AccessExchangeRequest {
+                source_audience: TEST_ACCESS_AUDIENCE.to_owned(),
+                audience: target_audience.to_owned(),
+                scope: "target.invoke".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        let token: Value = serde_json::from_slice(&body).unwrap();
+        let authority = store
+            .resolve_access_token(token["access_token"].as_str().unwrap(), target_audience)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(authority.sub, "upstream-subject");
+        assert_eq!(authority.act.sub, "upstream-subject");
+        assert_eq!(authority.scope, "target.invoke");
+        assert_eq!(authority.groups, vec!["operator"]);
+
+        headers.insert(
+            "x-b10x-access-exchange-secret",
+            HeaderValue::from_static("wrong-secret-that-is-still-long-enough"),
+        );
+        let refusal = exchange_access_token(
+            State(state),
+            headers,
+            Json(AccessExchangeRequest {
+                source_audience: TEST_ACCESS_AUDIENCE.to_owned(),
+                audience: target_audience.to_owned(),
+                scope: "target.read".to_owned(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refusal.status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

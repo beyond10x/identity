@@ -168,6 +168,13 @@ struct AccessTokenRequest<'a> {
     scope: &'a str,
 }
 
+#[derive(Serialize)]
+struct AccessExchangeRequest<'a> {
+    source_audience: &'a str,
+    audience: &'a str,
+    scope: &'a str,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AccessTokenResponse {
@@ -410,6 +417,61 @@ impl IdentityClient {
         })
     }
 
+    /// Exchanges a live source access token through one deployment-admitted confidential caller.
+    ///
+    /// The returned credential remains exact-audience and short-lived. Callers should inject the
+    /// caller secret from deployment-owned secret material and never expose it to a browser.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed refusal for malformed credentials, callers, audiences, or policy denials.
+    pub async fn exchange_access_token(
+        &self,
+        source_authorization: &str,
+        caller_id: &str,
+        caller_secret: &str,
+        source_audience: &str,
+        audience: &str,
+        scope: &str,
+    ) -> Result<AccessToken, ClientError> {
+        let authorization = HeaderValue::from_str(source_authorization)
+            .map_err(|_| ClientError::Configuration("authorization header is malformed"))?;
+        let caller_id = HeaderValue::from_str(caller_id)
+            .map_err(|_| ClientError::Configuration("exchange caller id is malformed"))?;
+        let caller_secret = HeaderValue::from_str(caller_secret)
+            .map_err(|_| ClientError::Configuration("exchange caller secret is malformed"))?;
+        let response = self
+            .http
+            .post(self.endpoint("v1/access-exchange")?)
+            .header(AUTHORIZATION, authorization)
+            .header("x-b10x-access-exchange-caller", caller_id)
+            .header("x-b10x-access-exchange-secret", caller_secret)
+            .json(&AccessExchangeRequest {
+                source_audience,
+                audience,
+                scope,
+            })
+            .send()
+            .await
+            .map_err(ClientError::Transport)?;
+        require_confidential(&response)?;
+        let response: AccessTokenResponse = decode_status(response).await?;
+        if response.token_type != "Bearer"
+            || response.expires_in <= 0
+            || response.access_token.is_empty()
+            || response.audience != audience
+            || response.scope != scope
+        {
+            return Err(ClientError::UnexpectedStatus(502));
+        }
+        Ok(AccessToken {
+            credential: AccessCredential(Zeroizing::new(response.access_token)),
+            expires_in: response.expires_in,
+            audience: response.audience,
+            scope: response.scope,
+        })
+    }
+
     /// Lists the upstream identities explicitly linked to this session's person.
     /// # Errors
     ///
@@ -529,6 +591,7 @@ async fn decode_status<T: for<'de> Deserialize<'de>>(
 #[cfg(test)]
 mod tests {
     use axum::Router;
+    use axum::extract::Json;
     use axum::http::{HeaderMap, StatusCode, header};
     use axum::response::{IntoResponse, Response};
     use axum::routing::{get, post};
@@ -566,6 +629,44 @@ mod tests {
         );
         let mut response = axum::Json(json!({
             "access_token":"synthetic-access",
+            "token_type":"Bearer",
+            "expires_in":300,
+            "audience":"urn:example:resource-api",
+            "scope":"resource.read"
+        }))
+        .into_response();
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+            .headers_mut()
+            .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+        response
+    }
+
+    async fn access_exchange(
+        headers: HeaderMap,
+        Json(request): Json<serde_json::Value>,
+    ) -> Response {
+        assert_eq!(
+            headers.get(header::AUTHORIZATION),
+            Some(&HeaderValue::from_static("Bearer synthetic-source-access"))
+        );
+        assert_eq!(
+            headers.get("x-b10x-access-exchange-caller"),
+            Some(&HeaderValue::from_static("service-a"))
+        );
+        assert_eq!(
+            headers.get("x-b10x-access-exchange-secret"),
+            Some(&HeaderValue::from_static(
+                "synthetic-secret-with-thirty-two-bytes"
+            ))
+        );
+        assert_eq!(request["source_audience"], "urn:example:published");
+        assert_eq!(request["audience"], "urn:example:resource-api");
+        assert_eq!(request["scope"], "resource.read");
+        let mut response = axum::Json(json!({
+            "access_token":"synthetic-exchanged-access",
             "token_type":"Bearer",
             "expires_in":300,
             "audience":"urn:example:resource-api",
@@ -654,6 +755,7 @@ mod tests {
                 Router::new()
                     .route("/v1/session-authority", get(authority))
                     .route("/v1/access-token", post(access))
+                    .route("/v1/access-exchange", post(access_exchange))
                     .route("/v1/access-authority", get(access_authority))
                     .route("/oauth/token", post(token)),
             )
@@ -693,6 +795,29 @@ mod tests {
             format!("{:?}", access.credential),
             "AccessCredential([REDACTED])"
         );
+    }
+
+    #[tokio::test]
+    async fn confidential_access_exchange_keeps_both_credentials_redacted() {
+        let client = IdentityClient::new(&test_origin().await, "urn:example:console").unwrap();
+        let access = client
+            .exchange_access_token(
+                "Bearer synthetic-source-access",
+                "service-a",
+                "synthetic-secret-with-thirty-two-bytes",
+                "urn:example:published",
+                "urn:example:resource-api",
+                "resource.read",
+            )
+            .await
+            .unwrap();
+        assert_eq!(access.audience, "urn:example:resource-api");
+        assert_eq!(access.scope, "resource.read");
+        assert_eq!(
+            format!("{:?}", access.credential),
+            "AccessCredential([REDACTED])"
+        );
+        assert!(!format!("{client:?}").contains("synthetic-secret"));
     }
 
     #[tokio::test]

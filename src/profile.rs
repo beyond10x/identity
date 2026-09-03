@@ -1716,6 +1716,8 @@ mod tests {
                 vec!["operator".to_owned()],
             )])
             .unwrap(),
+            trusted_access_callers: Vec::new(),
+            access_exchange_policies: Vec::new(),
             database_url: None,
             database_path: std::path::PathBuf::new(),
         }
