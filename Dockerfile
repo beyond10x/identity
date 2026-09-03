@@ -14,7 +14,8 @@ RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,s
 
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:adcd20c7b4c988b73cbfbddb26d2eee574571e6d7c9ffea29b3821e0690efb77
 ARG SOURCE_SHA=unknown
-LABEL org.opencontainers.image.revision=$SOURCE_SHA
+LABEL org.opencontainers.image.revision=$SOURCE_SHA \
+      org.opencontainers.image.source="https://github.com/beyond10x/identity"
 COPY --from=builder /out/identity /usr/local/bin/identity
 VOLUME ["/var/lib/identity"]
 EXPOSE 8080
