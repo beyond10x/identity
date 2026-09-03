@@ -102,6 +102,22 @@ against the issuer and client that started it. Additional identities are linked 
 `/v1/identity-links`; email equality never links people and the final login method cannot be
 removed.
 
+A deployment may admit a confidential service to exchange one exact access authority for another.
+The seam is disabled by default. Caller declarations contain only the environment-variable name;
+the secret itself must be injected separately from deployment-owned secret material:
+
+```bash
+IDENTITY_TRUSTED_ACCESS_CALLERS_JSON='[{"id":"relying-service","secretEnv":"IDENTITY_RELYING_SERVICE_EXCHANGE_SECRET"}]'
+IDENTITY_ACCESS_EXCHANGE_POLICIES_JSON='[{"callerId":"relying-service","sourceAudience":"urn:example:published-resource","requiredSourceScopes":["published.call"],"targetAudience":"urn:example:resource-api","allowedTargetScopes":["resource.read"]}]'
+```
+
+`POST /v1/access-exchange` requires the source access token in `Authorization` and the confidential
+caller in `x-b10x-access-exchange-caller` plus `x-b10x-access-exchange-secret`. Identity binds the
+request to the exact policy, requires a human self-actor, recomputes current groups, re-applies the
+target audience policy, and returns the ordinary five-minute verifier-only target credential. The
+calling service must never forward that credential to the public client whose source token it
+exchanged.
+
 Production configuration refuses a non-HTTPS public origin; plain HTTP is accepted only for the
 literal `127.0.0.1` local-test origin.
 
@@ -142,6 +158,7 @@ refuse it in a deployment, and any one of them is sufficient**:
 | `GET /oauth/authorize`, `GET /oauth/callback/upstream`, `POST /oauth/token` | the browser leg and the one-use code exchange; a registered RFC 8707 resource yields its short-lived access token directly |
 | `GET /v1/session-authority` | an allowlisted in-cluster caller resolves the current session |
 | `POST /v1/access-token`, `GET /v1/access-authority` | mint and resolve a five-minute audience-scoped access token |
+| `POST /v1/access-exchange` | confidentially narrow one live human access token into an exact deployment-admitted target audience and scope set |
 | `POST /v1/logout` | revokes the session and every outstanding access token for that subject |
 | `GET /v1/identity-links` | lists the current person's explicitly linked upstream identities |
 | `POST`, `DELETE /v1/identity-links/{provider_id}` | starts an authenticated link flow or removes a non-final link |

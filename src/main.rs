@@ -8,9 +8,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use identity::{
-    AccessAudiencePolicy, AppState, AudienceRegistry, Config, OrganizationDomainPolicy,
-    SecretValue, StaticGroupMemberships, Store, UpstreamProvider, WebClient, discover_upstreams,
-    router,
+    AccessAudiencePolicy, AccessExchangePolicy, AppState, AudienceRegistry, Config,
+    OrganizationDomainPolicy, SecretValue, StaticGroupMemberships, Store, TrustedAccessCaller,
+    UpstreamProvider, WebClient, discover_upstreams, router,
 };
 use serde::Deserialize;
 use tracing::info;
@@ -85,12 +85,82 @@ fn config_from_environment() -> Result<Config> {
         audience_registry: audience_registry()?,
         upstream_providers: upstream_providers()?,
         static_group_memberships: static_group_memberships()?,
+        trusted_access_callers: trusted_access_callers()?,
+        access_exchange_policies: access_exchange_policies()?,
         database_url: optional_database_url()?,
         database_path: PathBuf::from(
             env::var("IDENTITY_DATABASE_PATH")
                 .unwrap_or_else(|_| "/var/lib/identity/identity.sqlite3".to_owned()),
         ),
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TrustedAccessCallerEnvironmentConfig {
+    id: String,
+    secret_env: String,
+}
+
+fn trusted_access_callers() -> Result<Vec<TrustedAccessCaller>> {
+    let source =
+        env::var("IDENTITY_TRUSTED_ACCESS_CALLERS_JSON").unwrap_or_else(|_| "[]".to_owned());
+    let entries: Vec<TrustedAccessCallerEnvironmentConfig> = serde_json::from_str(&source)
+        .context("IDENTITY_TRUSTED_ACCESS_CALLERS_JSON must be a JSON array")?;
+    entries
+        .into_iter()
+        .map(|entry| {
+            validate_secret_environment_name(&entry.secret_env)?;
+            let secret = env::var(&entry.secret_env).with_context(|| {
+                format!(
+                    "{} is required for trusted access caller {}",
+                    entry.secret_env, entry.id
+                )
+            })?;
+            TrustedAccessCaller::new(entry.id, SecretValue::new(secret))
+        })
+        .collect()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccessExchangePolicyEnvironmentConfig {
+    caller_id: String,
+    source_audience: String,
+    required_source_scopes: Vec<String>,
+    target_audience: String,
+    allowed_target_scopes: Vec<String>,
+}
+
+fn access_exchange_policies() -> Result<Vec<AccessExchangePolicy>> {
+    let source =
+        env::var("IDENTITY_ACCESS_EXCHANGE_POLICIES_JSON").unwrap_or_else(|_| "[]".to_owned());
+    let entries: Vec<AccessExchangePolicyEnvironmentConfig> = serde_json::from_str(&source)
+        .context("IDENTITY_ACCESS_EXCHANGE_POLICIES_JSON must be a JSON array")?;
+    entries
+        .into_iter()
+        .map(|entry| {
+            AccessExchangePolicy::new(
+                entry.caller_id,
+                entry.source_audience,
+                entry.required_source_scopes,
+                entry.target_audience,
+                entry.allowed_target_scopes,
+            )
+        })
+        .collect()
+}
+
+fn validate_secret_environment_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > 128
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        bail!("secretEnv must name a bounded uppercase environment variable");
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -152,15 +222,8 @@ fn upstream_providers() -> Result<Vec<UpstreamProvider>> {
                         .collect(),
                 )?
             };
-            if entry.client_secret_env.is_empty()
-                || entry.client_secret_env.len() > 128
-                || !entry
-                    .client_secret_env
-                    .bytes()
-                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-            {
-                bail!("provider clientSecretEnv must name a bounded uppercase environment variable");
-            }
+            validate_secret_environment_name(&entry.client_secret_env)
+                .context("provider clientSecretEnv is invalid")?;
             let client_secret = env::var(&entry.client_secret_env).with_context(|| {
                 format!("{} is required for upstream provider {}", entry.client_secret_env, entry.id)
             })?;
