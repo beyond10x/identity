@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{self, Write as _};
 use std::net::SocketAddr;
 #[cfg(unix)]
@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Form, Path as AxumPath, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Json, Redirect, Response};
 use axum::routing::{delete, get, post, put};
 use base64::Engine;
@@ -412,6 +412,21 @@ impl AudienceRegistry {
             .iter()
             .find(|entry| entry.audience == audience)
             .map(|entry| entry.policy.clone())
+    }
+
+    fn advertised_access_scopes(&self) -> Vec<String> {
+        let mut scopes = BTreeSet::from([
+            "openid".to_owned(),
+            "profile".to_owned(),
+            "email".to_owned(),
+        ]);
+        for audience in &self.access {
+            scopes.extend(audience.policy.base_scopes.iter().cloned());
+            for group_scopes in audience.policy.group_scopes.values() {
+                scopes.extend(group_scopes.iter().cloned());
+            }
+        }
+        scopes.into_iter().collect()
     }
 
     fn update_generation(&self, digest: &mut Sha256) {
@@ -821,12 +836,16 @@ async fn initialize_postgres(client: &tokio_postgres::Client) -> Result<()> {
                client_state TEXT NOT NULL,
                client_nonce TEXT NOT NULL,
                client_code_challenge TEXT NOT NULL,
+               requested_audience TEXT,
+               requested_scope TEXT,
                upstream_nonce TEXT NOT NULL,
                upstream_pkce_verifier TEXT NOT NULL
              );
              ALTER TABLE login_transactions ADD COLUMN IF NOT EXISTS provider_id TEXT NOT NULL DEFAULT 'default';
              ALTER TABLE login_transactions ADD COLUMN IF NOT EXISTS link_subject TEXT;
              ALTER TABLE login_transactions ADD COLUMN IF NOT EXISTS link_tenant_id TEXT;
+             ALTER TABLE login_transactions ADD COLUMN IF NOT EXISTS requested_audience TEXT;
+             ALTER TABLE login_transactions ADD COLUMN IF NOT EXISTS requested_scope TEXT;
              CREATE TABLE IF NOT EXISTS identity_links (
                tenant_id TEXT NOT NULL,
                provider_id TEXT NOT NULL,
@@ -848,7 +867,9 @@ async fn initialize_postgres(client: &tokio_postgres::Client) -> Result<()> {
                code_challenge TEXT NOT NULL,
                subject TEXT NOT NULL,
                tenant_id TEXT NOT NULL,
-               email TEXT
+               email TEXT,
+               requested_audience TEXT,
+               requested_scope TEXT
              );
              CREATE TABLE IF NOT EXISTS sessions (
                verifier_hash BYTEA PRIMARY KEY,
@@ -866,6 +887,8 @@ async fn initialize_postgres(client: &tokio_postgres::Client) -> Result<()> {
              ALTER TABLE sessions ADD COLUMN IF NOT EXISTS issuer TEXT NOT NULL DEFAULT '';
              ALTER TABLE sessions ADD COLUMN IF NOT EXISTS configuration_generation TEXT NOT NULL DEFAULT '';
              ALTER TABLE authorization_codes ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '';
+             ALTER TABLE authorization_codes ADD COLUMN IF NOT EXISTS requested_audience TEXT;
+             ALTER TABLE authorization_codes ADD COLUMN IF NOT EXISTS requested_scope TEXT;
              CREATE TABLE IF NOT EXISTS access_tokens (
                verifier_hash BYTEA PRIMARY KEY,
                issuer TEXT NOT NULL,
@@ -969,6 +992,8 @@ impl Store {
                client_state TEXT NOT NULL,
                client_nonce TEXT NOT NULL,
                client_code_challenge TEXT NOT NULL,
+               requested_audience TEXT,
+               requested_scope TEXT,
                upstream_nonce TEXT NOT NULL,
                upstream_pkce_verifier TEXT NOT NULL
              );
@@ -993,7 +1018,9 @@ impl Store {
                code_challenge TEXT NOT NULL,
                subject TEXT NOT NULL,
                tenant_id TEXT NOT NULL,
-               email TEXT
+               email TEXT,
+               requested_audience TEXT,
+               requested_scope TEXT
              );
              CREATE TABLE IF NOT EXISTS sessions (
                verifier_hash BLOB PRIMARY KEY,
@@ -1036,9 +1063,28 @@ impl Store {
         ensure_sqlite_column(&connection, "login_transactions", "link_tenant_id", "TEXT")?;
         ensure_sqlite_column(
             &connection,
+            "login_transactions",
+            "requested_audience",
+            "TEXT",
+        )?;
+        ensure_sqlite_column(&connection, "login_transactions", "requested_scope", "TEXT")?;
+        ensure_sqlite_column(
+            &connection,
             "authorization_codes",
             "tenant_id",
             "TEXT NOT NULL DEFAULT ''",
+        )?;
+        ensure_sqlite_column(
+            &connection,
+            "authorization_codes",
+            "requested_audience",
+            "TEXT",
+        )?;
+        ensure_sqlite_column(
+            &connection,
+            "authorization_codes",
+            "requested_scope",
+            "TEXT",
         )?;
         ensure_sqlite_column(
             &connection,
@@ -1077,9 +1123,9 @@ impl Store {
                 self.sqlite_connection()?.execute(
                     "INSERT INTO login_transactions (
                        upstream_state, provider_id, created_at, client_id, redirect_uri, client_state,
-                       client_nonce, client_code_challenge, upstream_nonce, upstream_pkce_verifier,
-                       link_subject, link_tenant_id
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                       client_nonce, client_code_challenge, requested_audience, requested_scope,
+                       upstream_nonce, upstream_pkce_verifier, link_subject, link_tenant_id
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                     params![
                         login.upstream_state,
                         login.provider_id,
@@ -1089,6 +1135,8 @@ impl Store {
                         login.client_state,
                         login.client_nonce,
                         login.client_code_challenge,
+                        login.requested_audience,
+                        login.requested_scope,
                         login.upstream_nonce,
                         login.upstream_pkce_verifier,
                         login.link_subject,
@@ -1102,9 +1150,10 @@ impl Store {
                     .execute(
                         "INSERT INTO login_transactions (
                            upstream_state, provider_id, created_at, client_id, redirect_uri,
-                           client_state, client_nonce, client_code_challenge, upstream_nonce,
-                           upstream_pkce_verifier, link_subject, link_tenant_id
-                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                           client_state, client_nonce, client_code_challenge, requested_audience,
+                           requested_scope, upstream_nonce, upstream_pkce_verifier, link_subject,
+                           link_tenant_id
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
                         &[
                             &login.upstream_state,
                             &login.provider_id,
@@ -1114,6 +1163,8 @@ impl Store {
                             &login.client_state,
                             &login.client_nonce,
                             &login.client_code_challenge,
+                            &login.requested_audience,
+                            &login.requested_scope,
                             &login.upstream_nonce,
                             &login.upstream_pkce_verifier,
                             &login.link_subject,
@@ -1133,7 +1184,8 @@ impl Store {
                 .query_row(
                     "DELETE FROM login_transactions WHERE upstream_state = ?1
                      RETURNING upstream_state, provider_id, created_at, client_id, redirect_uri,
-                               client_state, client_nonce, client_code_challenge, upstream_nonce,
+                               client_state, client_nonce, client_code_challenge,
+                               requested_audience, requested_scope, upstream_nonce,
                                upstream_pkce_verifier, link_subject, link_tenant_id",
                     [state],
                     |row| {
@@ -1146,10 +1198,12 @@ impl Store {
                             client_state: row.get(5)?,
                             client_nonce: row.get(6)?,
                             client_code_challenge: row.get(7)?,
-                            upstream_nonce: row.get(8)?,
-                            upstream_pkce_verifier: row.get(9)?,
-                            link_subject: row.get(10)?,
-                            link_tenant_id: row.get(11)?,
+                            requested_audience: row.get(8)?,
+                            requested_scope: row.get(9)?,
+                            upstream_nonce: row.get(10)?,
+                            upstream_pkce_verifier: row.get(11)?,
+                            link_subject: row.get(12)?,
+                            link_tenant_id: row.get(13)?,
                         })
                     },
                 )
@@ -1161,7 +1215,8 @@ impl Store {
                     .query_opt(
                         "DELETE FROM login_transactions WHERE upstream_state = $1
                      RETURNING upstream_state, provider_id, created_at, client_id, redirect_uri,
-                               client_state, client_nonce, client_code_challenge, upstream_nonce,
+                               client_state, client_nonce, client_code_challenge,
+                               requested_audience, requested_scope, upstream_nonce,
                                upstream_pkce_verifier, link_subject, link_tenant_id",
                         &[&state],
                     )
@@ -1176,10 +1231,12 @@ impl Store {
                             client_state: row.get(5),
                             client_nonce: row.get(6),
                             client_code_challenge: row.get(7),
-                            upstream_nonce: row.get(8),
-                            upstream_pkce_verifier: row.get(9),
-                            link_subject: row.get(10),
-                            link_tenant_id: row.get(11),
+                            requested_audience: row.get(8),
+                            requested_scope: row.get(9),
+                            upstream_nonce: row.get(10),
+                            upstream_pkce_verifier: row.get(11),
+                            link_subject: row.get(12),
+                            link_tenant_id: row.get(13),
                         })
                     })
                     .map_err(Into::into)
@@ -1386,8 +1443,8 @@ impl Store {
                 self.sqlite_connection()?.execute(
                     "INSERT INTO authorization_codes (
                        code_hash, created_at, client_id, redirect_uri, code_challenge, subject,
-                       tenant_id, email
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                       tenant_id, email, requested_audience, requested_scope
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         digest,
                         authorization.created_at,
@@ -1397,6 +1454,8 @@ impl Store {
                         authorization.subject,
                         authorization.tenant_id,
                         authorization.email,
+                        authorization.requested_audience,
+                        authorization.requested_scope,
                     ],
                 )?;
             }
@@ -1406,8 +1465,8 @@ impl Store {
                     .execute(
                         "INSERT INTO authorization_codes (
                            code_hash, created_at, client_id, redirect_uri, code_challenge, subject,
-                           tenant_id, email
-                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                           tenant_id, email, requested_audience, requested_scope
+                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                         &[
                             &digest,
                             &authorization.created_at,
@@ -1417,6 +1476,8 @@ impl Store {
                             &authorization.subject,
                             &authorization.tenant_id,
                             &authorization.email,
+                            &authorization.requested_audience,
+                            &authorization.requested_scope,
                         ],
                     )
                     .await?;
@@ -1433,7 +1494,7 @@ impl Store {
                 .query_row(
                     "DELETE FROM authorization_codes WHERE code_hash = ?1
                      RETURNING created_at, client_id, redirect_uri, code_challenge, subject,
-                               tenant_id, email",
+                               tenant_id, email, requested_audience, requested_scope",
                     [digest.as_slice()],
                     |row| {
                         Ok(PendingAuthorization {
@@ -1444,6 +1505,8 @@ impl Store {
                             subject: row.get(4)?,
                             tenant_id: row.get(5)?,
                             email: row.get(6)?,
+                            requested_audience: row.get(7)?,
+                            requested_scope: row.get(8)?,
                         })
                     },
                 )
@@ -1455,7 +1518,7 @@ impl Store {
                     .query_opt(
                         "DELETE FROM authorization_codes WHERE code_hash = $1
                      RETURNING created_at, client_id, redirect_uri, code_challenge, subject,
-                               tenant_id, email",
+                               tenant_id, email, requested_audience, requested_scope",
                         &[&digest],
                     )
                     .await
@@ -1468,6 +1531,8 @@ impl Store {
                             subject: row.get(4),
                             tenant_id: row.get(5),
                             email: row.get(6),
+                            requested_audience: row.get(7),
+                            requested_scope: row.get(8),
                         })
                     })
                     .map_err(Into::into)
@@ -1979,6 +2044,8 @@ struct LoginTransaction {
     client_state: String,
     client_nonce: String,
     client_code_challenge: String,
+    requested_audience: Option<String>,
+    requested_scope: Option<String>,
     upstream_nonce: String,
     upstream_pkce_verifier: String,
     link_subject: Option<String>,
@@ -1994,6 +2061,8 @@ struct PendingAuthorization {
     subject: String,
     tenant_id: String,
     email: Option<String>,
+    requested_audience: Option<String>,
+    requested_scope: Option<String>,
 }
 
 #[derive(Debug)]
@@ -2024,12 +2093,17 @@ struct AuthorizeQuery {
     redirect_uri: String,
     scope: String,
     state: String,
-    nonce: String,
+    #[serde(default)]
+    nonce: Option<String>,
     code_challenge: String,
     code_challenge_method: String,
     /// Deployment-configured upstream provider id. Required when more than one is configured.
     #[serde(default)]
     identity_provider: Option<String>,
+    /// RFC 8707 resource indicator. When present, the authorization code yields a short-lived
+    /// access token for this exact registered audience rather than an Identity browser session.
+    #[serde(default)]
+    resource: Option<String>,
     /// The mailbox to sign in as, read only by a loopback development build. A deployed Identity
     /// does not have this field, so the standard parameter is ignored there as any unknown one is.
     #[cfg(feature = "local-login")]
@@ -2050,6 +2124,10 @@ struct TokenRequest {
     code: String,
     redirect_uri: String,
     code_verifier: String,
+    #[serde(default)]
+    resource: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2062,6 +2140,18 @@ struct LoginMetadata {
     response_types_supported: [&'static str; 1],
     grant_types_supported: [&'static str; 1],
     code_challenge_methods_supported: [&'static str; 1],
+}
+
+#[derive(Debug, Serialize)]
+struct AuthorizationServerMetadata {
+    issuer: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    response_types_supported: [&'static str; 1],
+    grant_types_supported: [&'static str; 1],
+    code_challenge_methods_supported: [&'static str; 1],
+    token_endpoint_auth_methods_supported: [&'static str; 1],
+    scopes_supported: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2247,6 +2337,10 @@ pub fn router(state: AppState) -> Router {
         .route("/readyz", get(readiness))
         .route("/healthz", get(readiness))
         .route("/.well-known/identity-cli-login", get(login_metadata))
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(authorization_server_metadata),
+        )
         .route("/oauth/authorize", get(authorize))
         .route("/oauth/callback/upstream", get(upstream_callback))
         .route("/oauth/token", post(exchange_token))
@@ -2389,16 +2483,27 @@ async fn login_metadata(State(state): State<AppState>) -> Json<LoginMetadata> {
     })
 }
 
+async fn authorization_server_metadata(
+    State(state): State<AppState>,
+) -> Json<AuthorizationServerMetadata> {
+    let origin = state.config.public_origin.as_str().trim_end_matches('/');
+    Json(AuthorizationServerMetadata {
+        issuer: origin.to_owned(),
+        authorization_endpoint: format!("{origin}/oauth/authorize"),
+        token_endpoint: format!("{origin}/oauth/token"),
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256"],
+        token_endpoint_auth_methods_supported: ["none"],
+        scopes_supported: state.config.audience_registry.advertised_access_scopes(),
+    })
+}
+
 async fn issue_access_token(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<AccessTokenRequest>,
 ) -> Result<Response, HttpError> {
-    let policy = state
-        .config
-        .audience_registry
-        .access_policy(&request.audience)
-        .ok_or_else(|| HttpError::denied("the requested audience is not admitted"))?;
     let credential = bearer(&headers, valid_session_credential)
         .ok_or_else(|| HttpError::denied("a valid Identity session is required"))?;
     let admitted = state
@@ -2407,11 +2512,36 @@ async fn issue_access_token(
         .await
         .map_err(HttpError::internal)?
         .ok_or_else(|| HttpError::denied("the Identity session is expired or revoked"))?;
+    let _ = admitted.expires_at;
+    mint_access_token(
+        &state,
+        request.audience,
+        &request.scope,
+        admitted.tenant_id,
+        admitted.subject,
+        admitted.email,
+    )
+    .await
+}
+
+async fn mint_access_token(
+    state: &AppState,
+    audience: String,
+    requested_scope: &str,
+    tenant_id: String,
+    subject: String,
+    email: Option<String>,
+) -> Result<Response, HttpError> {
+    let policy = state
+        .config
+        .audience_registry
+        .access_policy(&audience)
+        .ok_or_else(|| HttpError::denied("the requested audience is not admitted"))?;
     let groups = state
         .config
         .static_group_memberships
-        .groups_for(&admitted.tenant_id, admitted.email.as_deref());
-    let scope = policy.admit(&request.scope, &groups)?;
+        .groups_for(&tenant_id, email.as_deref());
+    let scope = policy.admit(requested_scope, &groups)?;
     let now = unix_time().map_err(HttpError::internal)?;
     let credential = format!(
         "identity_access_v1_{}",
@@ -2424,8 +2554,8 @@ async fn issue_access_token(
             .as_str()
             .trim_end_matches('/')
             .to_owned(),
-        sub: admitted.subject.clone(),
-        aud: request.audience,
+        sub: subject.clone(),
+        aud: audience,
         iat: now,
         nbf: now,
         exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
@@ -2433,16 +2563,13 @@ async fn issue_access_token(
             "identity_jti_v1_{}",
             random_token(16).map_err(HttpError::internal)?
         ),
-        act: Actor {
-            sub: admitted.subject,
-        },
+        act: Actor { sub: subject },
         scope: scope.clone(),
         principal_kind: "human".to_owned(),
-        tenant_id: admitted.tenant_id,
-        email: admitted.email,
+        tenant_id,
+        email,
         groups,
     };
-    let _ = admitted.expires_at;
     state
         .store
         .put_access_token(&credential, &authority)
@@ -2618,6 +2745,8 @@ async fn start_identity_link(
             client_state: String::new(),
             client_nonce: String::new(),
             client_code_challenge: String::new(),
+            requested_audience: None,
+            requested_scope: None,
             upstream_nonce,
             upstream_pkce_verifier: verifier.secret().clone(),
             link_subject: Some(admitted.subject),
@@ -2654,6 +2783,9 @@ async fn authorize(
     Query(query): Query<AuthorizeQuery>,
 ) -> Result<Response, HttpError> {
     validate_authorization_request(&state.config, &query)?;
+    if query.identity_provider.is_none() && state.config.upstream_providers.len() > 1 {
+        return Ok(provider_selection(&state.config, &query));
+    }
     // A loopback development build has no provider to redirect to, and signs the request in itself.
     #[cfg(feature = "local-login")]
     if local_login::admitted(&state.config) {
@@ -2705,8 +2837,10 @@ async fn authorize(
             client_id: query.client_id,
             redirect_uri: query.redirect_uri,
             client_state: query.state,
-            client_nonce: query.nonce,
+            client_nonce: query.nonce.unwrap_or_default(),
             client_code_challenge: query.code_challenge,
+            requested_audience: query.resource,
+            requested_scope: Some(query.scope),
             upstream_nonce,
             upstream_pkce_verifier: verifier.secret().clone(),
             link_subject: None,
@@ -2715,6 +2849,49 @@ async fn authorize(
         .await
         .map_err(HttpError::internal)?;
     Ok(Redirect::temporary(authorization_url.as_str()).into_response())
+}
+
+fn provider_selection(config: &Config, query: &AuthorizeQuery) -> Response {
+    let mut hidden = String::new();
+    for (name, value) in [
+        ("response_type", Some(query.response_type.as_str())),
+        ("client_id", Some(query.client_id.as_str())),
+        ("redirect_uri", Some(query.redirect_uri.as_str())),
+        ("scope", Some(query.scope.as_str())),
+        ("state", Some(query.state.as_str())),
+        ("nonce", query.nonce.as_deref()),
+        ("code_challenge", Some(query.code_challenge.as_str())),
+        (
+            "code_challenge_method",
+            Some(query.code_challenge_method.as_str()),
+        ),
+        ("resource", query.resource.as_deref()),
+    ] {
+        if let Some(value) = value {
+            let _ = write!(
+                hidden,
+                "<input type=\"hidden\" name=\"{name}\" value=\"{}\">",
+                html_escape(value)
+            );
+        }
+    }
+    let mut choices = String::new();
+    for provider in &config.upstream_providers {
+        let _ = write!(
+            choices,
+            "<button name=\"identity_provider\" value=\"{}\" type=\"submit\">{}</button>",
+            html_escape(&provider.id),
+            html_escape(&provider.label)
+        );
+    }
+    let mut response = Html(format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Choose a sign-in provider</title><style>body{{font:16px/1.5 system-ui,sans-serif;margin:4rem auto;max-width:34rem;padding:0 1rem}}form{{display:grid;gap:.75rem}}button{{font:inherit;padding:.7rem 1rem;text-align:left}}</style></head><body><h1>Choose a sign-in provider</h1><p>Continue with one of the identities configured for this deployment.</p><form method=\"get\" action=\"/oauth/authorize\">{hidden}{choices}</form></body></html>"
+    ))
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// Whether a loopback development build may complete a sign-in without an upstream provider.
@@ -2945,6 +3122,8 @@ async fn upstream_callback(
                 subject: identity.subject,
                 tenant_id,
                 email: identity.email,
+                requested_audience: login.requested_audience,
+                requested_scope: login.requested_scope,
             },
         )
         .await
@@ -2980,6 +3159,33 @@ async fn exchange_token(
         || pkce_challenge(&request.code_verifier) != authorization.code_challenge
     {
         return Err(HttpError::denied("authorization code binding failed"));
+    }
+    if let Some(audience) = authorization.requested_audience {
+        if request.resource.as_deref() != Some(audience.as_str()) {
+            return Err(HttpError::denied("authorization resource binding failed"));
+        }
+        let scope = authorization
+            .requested_scope
+            .ok_or_else(|| HttpError::internal("authorization scope is absent"))?;
+        if request
+            .scope
+            .as_deref()
+            .is_some_and(|requested| requested != scope)
+        {
+            return Err(HttpError::denied("authorization scope binding failed"));
+        }
+        return mint_access_token(
+            &state,
+            audience,
+            &scope,
+            authorization.tenant_id,
+            authorization.subject,
+            authorization.email,
+        )
+        .await;
+    }
+    if request.resource.is_some() {
+        return Err(HttpError::denied("authorization resource binding failed"));
     }
     let credential = format!(
         "identity_session_v1_{}",
@@ -3038,8 +3244,12 @@ fn validate_authorization_request(
             return Err(HttpError::denied("unknown client_id or redirect_uri"));
         }
     }
-    let scopes = query.scope.split_ascii_whitespace().collect::<HashSet<_>>();
-    if !scopes.contains("openid") {
+    let scopes = canonical_requested_scopes(&query.scope)?;
+    if let Some(resource) = query.resource.as_deref() {
+        if config.audience_registry.access_policy(resource).is_none() {
+            return Err(HttpError::denied("the requested resource is not admitted"));
+        }
+    } else if !scopes.contains("openid") {
         return Err(HttpError::invalid("scope must contain openid"));
     }
     if query.code_challenge_method != "S256" || !valid_b64_token(&query.code_challenge, 43, 43) {
@@ -3047,10 +3257,16 @@ fn validate_authorization_request(
             "a valid S256 PKCE challenge is required",
         ));
     }
-    if !valid_b64_token(&query.state, 32, 512) || !valid_b64_token(&query.nonce, 32, 512) {
-        return Err(HttpError::invalid(
-            "state and nonce must carry at least 192 bits",
-        ));
+    if !valid_b64_token(&query.state, 32, 512) {
+        return Err(HttpError::invalid("state must carry at least 192 bits"));
+    }
+    if query.resource.is_none()
+        && !query
+            .nonce
+            .as_deref()
+            .is_some_and(|nonce| valid_b64_token(nonce, 32, 512))
+    {
+        return Err(HttpError::invalid("nonce must carry at least 192 bits"));
     }
     Ok(())
 }
@@ -3367,13 +3583,86 @@ mod tests {
             redirect_uri: "http://127.0.0.1:43123/callback".to_owned(),
             scope: "openid profile email".to_owned(),
             state: random_token(32).unwrap(),
-            nonce: random_token(32).unwrap(),
+            nonce: Some(random_token(32).unwrap()),
             code_challenge: pkce_challenge(&"a".repeat(64)),
             code_challenge_method: "S256".to_owned(),
             identity_provider: None,
+            resource: None,
             #[cfg(feature = "local-login")]
             login_hint: None,
         }
+    }
+
+    fn app_state(store: Store) -> AppState {
+        AppState::new(
+            Arc::new(config()),
+            BTreeMap::new(),
+            openidconnect::reqwest::ClientBuilder::new()
+                .redirect(openidconnect::reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            store,
+        )
+    }
+
+    #[tokio::test]
+    async fn authorization_server_metadata_advertises_public_pkce_access() {
+        let Json(metadata) =
+            authorization_server_metadata(State(app_state(Store::in_memory().unwrap()))).await;
+        assert_eq!(metadata.issuer, "http://127.0.0.1:8080");
+        assert_eq!(
+            metadata.authorization_endpoint,
+            "http://127.0.0.1:8080/oauth/authorize"
+        );
+        assert_eq!(metadata.token_endpoint, "http://127.0.0.1:8080/oauth/token");
+        assert_eq!(metadata.token_endpoint_auth_methods_supported, ["none"]);
+        assert_eq!(metadata.code_challenge_methods_supported, ["S256"]);
+        assert!(
+            metadata
+                .scopes_supported
+                .contains(&"resource.read".to_owned())
+        );
+        assert!(
+            metadata
+                .scopes_supported
+                .contains(&"resource.write".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn standard_authorization_shows_the_configured_provider_choices() {
+        let mut config = config();
+        config.upstream_providers.push(UpstreamProvider {
+            id: "second".to_owned(),
+            label: "Second provider".to_owned(),
+            issuer: "https://second.example.test".to_owned(),
+            client_id: "second-client".to_owned(),
+            client_secret: SecretValue::new("second-secret".to_owned()),
+            organization_domain_policy: OrganizationDomainPolicy::default(),
+        });
+        let state = AppState::new(
+            Arc::new(config),
+            BTreeMap::new(),
+            openidconnect::reqwest::ClientBuilder::new()
+                .redirect(openidconnect::reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            Store::in_memory().unwrap(),
+        );
+        let mut query = authorization_query();
+        query.scope = "resource.read".to_owned();
+        query.resource = Some(TEST_ACCESS_AUDIENCE.to_owned());
+        query.nonce = None;
+        let response = authorize(State(state), Query(query)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Example"));
+        assert!(body.contains("Second provider"));
+        assert!(body.contains("name=\"resource\""));
+        assert!(body.contains(TEST_ACCESS_AUDIENCE));
     }
 
     #[test]
@@ -3593,6 +3882,18 @@ mod tests {
     }
 
     #[test]
+    fn resource_authorization_requires_an_exact_registered_audience_and_not_an_oidc_nonce() {
+        let mut query = authorization_query();
+        query.scope = "resource.read".to_owned();
+        query.resource = Some(TEST_ACCESS_AUDIENCE.to_owned());
+        query.nonce = None;
+        validate_authorization_request(&config(), &query).unwrap();
+
+        query.resource = Some("urn:example:unknown".to_owned());
+        assert!(validate_authorization_request(&config(), &query).is_err());
+    }
+
+    #[test]
     fn authorization_accepts_only_the_registered_web_callback() {
         let mut query = authorization_query();
         query.client_id = "status-web".to_owned();
@@ -3757,6 +4058,8 @@ mod tests {
             subject: "upstream-subject".to_owned(),
             tenant_id: "tenant-dev".to_owned(),
             email: Some("developer@example.test".to_owned()),
+            requested_audience: None,
+            requested_scope: Some("openid profile email".to_owned()),
         };
         store.put_code("secret-code", &authorization).await.unwrap();
         let raw_count: i64 = store
@@ -3771,6 +4074,58 @@ mod tests {
         assert_eq!(raw_count, 0);
         assert!(store.take_code("secret-code").await.unwrap().is_some());
         assert!(store.take_code("secret-code").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn resource_authorization_code_mints_one_exact_short_lived_access_token() {
+        let store = Store::in_memory().unwrap();
+        let verifier = "b".repeat(64);
+        let authorization = PendingAuthorization {
+            created_at: unix_time().unwrap(),
+            client_id: "harness-cli".to_owned(),
+            redirect_uri: "http://127.0.0.1:43123/callback".to_owned(),
+            code_challenge: pkce_challenge(&verifier),
+            subject: "upstream-subject".to_owned(),
+            tenant_id: "tenant-dev".to_owned(),
+            email: Some("operator@example.test".to_owned()),
+            requested_audience: Some(TEST_ACCESS_AUDIENCE.to_owned()),
+            requested_scope: Some("resource.read resource.write".to_owned()),
+        };
+        store
+            .put_code("resource-code", &authorization)
+            .await
+            .unwrap();
+        let state = app_state(store.clone());
+        let response = exchange_token(
+            State(state),
+            Form(TokenRequest {
+                grant_type: "authorization_code".to_owned(),
+                client_id: authorization.client_id,
+                code: "resource-code".to_owned(),
+                redirect_uri: authorization.redirect_uri,
+                code_verifier: verifier,
+                resource: authorization.requested_audience,
+                scope: authorization.requested_scope,
+            }),
+        )
+        .await
+        .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        let token: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(token["token_type"], "Bearer");
+        assert_eq!(token["audience"], TEST_ACCESS_AUDIENCE);
+        assert_eq!(token["scope"], "resource.read resource.write");
+        let credential = token["access_token"].as_str().unwrap();
+        let authority = store
+            .resolve_access_token(credential, TEST_ACCESS_AUDIENCE)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(authority.sub, "upstream-subject");
+        assert_eq!(authority.groups, vec!["operator"]);
+        assert!(store.take_code("resource-code").await.unwrap().is_none());
     }
 
     #[tokio::test]

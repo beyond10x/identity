@@ -97,6 +97,8 @@ pub(crate) async fn complete(
                 subject: format!("{SUBJECT_PREFIX}{email}"),
                 tenant_id,
                 email: Some(email),
+                requested_audience: query.resource.clone(),
+                requested_scope: Some(query.scope.clone()),
             },
         )
         .await
@@ -120,7 +122,6 @@ fn form(config: &Config, query: &AuthorizeQuery) -> (StatusCode, Html<String>) {
         ("redirect_uri", query.redirect_uri.as_str()),
         ("scope", query.scope.as_str()),
         ("state", query.state.as_str()),
-        ("nonce", query.nonce.as_str()),
         ("code_challenge", query.code_challenge.as_str()),
         (
             "code_challenge_method",
@@ -132,6 +133,18 @@ fn form(config: &Config, query: &AuthorizeQuery) -> (StatusCode, Html<String>) {
             hidden,
             "<input type=\"hidden\" name=\"{name}\" value=\"{value}\">"
         );
+    }
+    for (name, value) in [
+        ("nonce", query.nonce.as_deref()),
+        ("resource", query.resource.as_deref()),
+    ] {
+        if let Some(value) = value {
+            let value = html_escape(value);
+            let _ = write!(
+                hidden,
+                "<input type=\"hidden\" name=\"{name}\" value=\"{value}\">"
+            );
+        }
     }
     let origin = html_escape(config.public_origin.as_str());
     let tenant = html_escape(&config.tenant_id);
