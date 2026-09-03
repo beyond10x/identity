@@ -66,7 +66,7 @@ jobs:
           cache-from: type=gha,scope=identity-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=identity-${{ matrix.arch }}
           build-args: SOURCE_SHA=${{ github.sha }}
-          tags: ghcr.io/beyond10x/identity:${{ github.ref_name }}-${{ matrix.arch }}
+          tags: ghcr.io/beyond10x/identity-runtime:${{ github.ref_name }}-${{ matrix.arch }}
 
   manifest:
     needs: image
@@ -84,19 +84,19 @@ jobs:
       - name: Publish and sign the immutable manifest
         id: publish
         run: |
-          image="ghcr.io/beyond10x/identity:${GITHUB_REF_NAME}"
+          image="ghcr.io/beyond10x/identity-runtime:${GITHUB_REF_NAME}"
           docker buildx imagetools create \
             --tag "$image" \
             "${image}-amd64" \
             "${image}-arm64"
           digest=$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' | tr -d '"')
           case "$digest" in sha256:*) ;; *) exit 1 ;; esac
-          cosign sign --yes "ghcr.io/beyond10x/identity@${digest}"
+          cosign sign --yes "ghcr.io/beyond10x/identity-runtime@${digest}"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
       - name: Require private package visibility
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: test "$(gh api /orgs/beyond10x/packages/container/identity --jq .visibility)" = private
+        run: test "$(gh api /orgs/beyond10x/packages/container/identity-runtime --jq .visibility)" = private
 
   release:
     needs: manifest
