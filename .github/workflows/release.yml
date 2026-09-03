@@ -5,19 +5,20 @@ on:
     tags: ["[0-9]+.[0-9]+.[0-9]+"]
 
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: read
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      source-commit: ${{ steps.source.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Require the provider-reported default branch tip
+        id: source
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -26,93 +27,43 @@ jobs:
           tag_sha=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
           test -n "$default_branch"
           test "$tag_sha" = "$default_sha"
+          echo "commit=${tag_sha}" >> "$GITHUB_OUTPUT"
       - name: Match the workspace version
         run: |
           workspace_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           test "$workspace_version" = "$GITHUB_REF_NAME"
 
-  image:
+  promote:
     needs: validate
-    name: image (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - arch: amd64
-            platform: linux/amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          push: true
-          provenance: mode=max
-          sbom: true
-          cache-from: type=gha,scope=identity-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=identity-${{ matrix.arch }}
-          build-args: SOURCE_SHA=${{ github.sha }}
-          tags: ghcr.io/beyond10x/identity-runtime:${{ github.ref_name }}-${{ matrix.arch }}
-
-  manifest:
-    needs: image
-    runs-on: ubuntu-latest
-    outputs:
-      digest: ${{ steps.publish.outputs.digest }}
-    steps:
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-      - name: Publish and sign the immutable manifest
-        id: publish
-        run: |
-          image="ghcr.io/beyond10x/identity-runtime:${GITHUB_REF_NAME}"
-          docker buildx imagetools create \
-            --tag "$image" \
-            "${image}-amd64" \
-            "${image}-arm64"
-          digest=$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' | tr -d '"')
-          case "$digest" in sha256:*) ;; *) exit 1 ;; esac
-          cosign sign --yes "ghcr.io/beyond10x/identity-runtime@${digest}"
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-      - name: Require private package visibility
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: test "$(gh api /orgs/beyond10x/packages/container/identity-runtime --jq .visibility)" = private
-
-  release:
-    needs: manifest
     runs-on: ubuntu-latest
     steps:
-      - name: Record the immutable release
-        env:
-          IMAGE_DIGEST: ${{ needs.manifest.outputs.digest }}
-        run: |
-          jq --null-input \
-            --arg version "$GITHUB_REF_NAME" \
-            --arg commit "$GITHUB_SHA" \
-            --arg image "$IMAGE_DIGEST" \
-            '{schema:1, version:$version, source_commit:$commit, artifacts:{identity_runtime:$image}}' \
-            > release-manifest.json
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - name: Organization release token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
-          generate_release_notes: true
-          files: release-manifest.json
+          app-id: ${{ secrets.B10X_BOT_APP_ID }}
+          private-key: ${{ secrets.B10X_BOT_PRIVATE_KEY }}
+          owner: beyond10x
+          repositories: |
+            devcenter
+            identity
+      - name: Delegate the private runtime promotion
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SOURCE_COMMIT: ${{ needs.validate.outputs.source-commit }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          gh workflow run promote-identity.yml \
+            --repo beyond10x/devcenter \
+            --ref main \
+            -f "version=${VERSION}" \
+            -f "source_commit=${SOURCE_COMMIT}"
+
+          for _ in $(seq 1 180); do
+            if gh release view "$VERSION" --repo beyond10x/identity >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Identity runtime promotion did not publish release ${VERSION} within 15 minutes" >&2
+          exit 1
