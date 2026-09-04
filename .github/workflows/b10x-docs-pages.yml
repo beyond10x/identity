@@ -4,9 +4,10 @@ name: Documentation façade
 on:
   workflow_dispatch:
     inputs:
-      website_sha:
-        description: Exact Website commit already live at the organization root
-        required: true
+      migration_website_sha:
+        description: Optional fixed root Website commit used once to preserve stable alias bytes
+        required: false
+        default: ""
         type: string
 
 permissions: {}
@@ -26,8 +27,10 @@ jobs:
       contents: read
       pages: write
       id-token: write
-    uses: beyond10x/website/.github/workflows/redirect-facade.yml@abf8288dc65da55c74931724f9185f46a3a2e49f
+    uses: beyond10x/website/.github/workflows/redirect-facade.yml@4a09142bebf7174c0ae7363566261bb54b94bbb1
     with:
-      website_sha: ${{ inputs.website_sha }}
       repository: identity
       control_sha: ${{ github.sha }}
+      canonical_route: /docs/identity/
+      profile_route: /ecosystem/identity/
+      migration_website_sha: ${{ inputs.migration_website_sha || '' }}
