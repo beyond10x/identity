@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod upstream_tls;
+
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,12 +40,17 @@ async fn main() -> Result<()> {
             config.public_origin
         );
     }
-    let http_client = openidconnect::reqwest::ClientBuilder::new()
-        .redirect(openidconnect::reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(15))
-        .build()
-        .context("build OIDC HTTP client")?;
+    let http_client = upstream_tls::with_ca_bundle(
+        openidconnect::reqwest::ClientBuilder::new(),
+        env::var_os("IDENTITY_UPSTREAM_CA_BUNDLE")
+            .as_deref()
+            .map(std::path::Path::new),
+    )?
+    .redirect(openidconnect::reqwest::redirect::Policy::none())
+    .connect_timeout(Duration::from_secs(5))
+    .timeout(Duration::from_secs(15))
+    .build()
+    .context("build OIDC HTTP client")?;
     let upstreams = discover_upstreams(&config, &http_client).await?;
     let store = match config.database_url.as_ref() {
         Some(url) => Store::connect_postgres(url.expose_secret()).await?,
