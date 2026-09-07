@@ -86,6 +86,13 @@ IDENTITY_DATABASE_PATH=/tmp/identity/private/identity.sqlite3 \
 cargo run --locked
 ```
 
+`IDENTITY_UPSTREAM_CA_BUNDLE` optionally names a PEM certificate bundle containing additional
+trusted roots for upstream OIDC HTTPS requests. This supports private certificate authorities,
+including disposable local deployments, while preserving certificate and hostname verification.
+The file must contain certificates and be no larger than 1 MiB; unreadable or invalid configured
+bundles refuse startup. Omit it to use the normal built-in roots. It applies to every configured
+upstream provider and does not enable the development login route.
+
 The three `IDENTITY_UPSTREAM_*` variables remain the single-provider compatibility surface. A
 deployment with several providers instead supplies a credential-free registry whose
 `clientSecretEnv` entries name separately injected environment variables:
