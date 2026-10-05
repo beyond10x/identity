@@ -27,7 +27,7 @@ jobs:
       contents: read
       pages: write
       id-token: write
-    uses: beyond10x/website/.github/workflows/redirect-facade.yml@3886bbd1c3c88a8ee8076c5d43753ae0cfa1890a
+    uses: beyond10x/website/.github/workflows/redirect-facade.yml@f513d180464abb5599b89304a21e09a45ebf78cb
     with:
       repository: identity
       control_sha: ${{ github.sha }}
