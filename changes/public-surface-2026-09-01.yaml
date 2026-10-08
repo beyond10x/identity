@@ -11,5 +11,4 @@ source:
 journeys: [build-agents, operate-services]
 affectedSurfaces: [identity/docs]
 relations:
-  - {target: surface:connectors/docs, kind: enables, label: Issues bounded Connector authority}
   - {target: surface:agent-platform/docs, kind: enables, label: Supplies tenant and principal truth}
