@@ -41,9 +41,6 @@ surfaces:
   primaryJourney: operate-services
   relationships:
   - kind: supports
-    label: Issues exact-audience Connector authority
-    target: connectors/docs
-  - kind: supports
     label: Supplies tenant and principal truth
     target: agent-platform/docs
   - kind: uses
