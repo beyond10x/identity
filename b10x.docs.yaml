@@ -40,9 +40,6 @@ surfaces:
   name: Identity
   primaryJourney: operate-services
   relationships:
-  - kind: supports
-    label: Supplies tenant and principal truth
-    target: agent-platform/docs
   - kind: uses
     label: Stores durable Identity-owned state as events
     target: eventlog/docs
