@@ -133,10 +133,11 @@ bash scripts/check-secrets.sh
 Both feature postures are gated because invariant 8 is a property of *both* builds. Green here is the
 bar for `main`.
 
-**A green local gate does not guarantee a green CI.** The steps mirror each other; the toolchain does
-not — CI installs whatever `stable` is that day, and a newer clippy or a newly published advisory can
-fail a commit that passed locally. Run `rustup update` before pushing, and read the gate's own exit
-status, never a pipeline's (`gate.sh 2>&1 | tail` reports `tail`'s status, not the gate's).
+**One rustc.** `rust-toolchain.toml` pins the compiler, clippy and rustfmt the gate runs, and the
+`Dockerfile` builder image carries the same rustc version. Move both in one change. A newly
+published advisory can still fail a commit that passed before, so run the audit step on the commit
+you push. Read the gate's own exit status, never a pipeline's (`gate.sh 2>&1 | tail` reports
+`tail`'s status, not the gate's).
 
 ## Releases
 

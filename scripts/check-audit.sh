@@ -7,7 +7,7 @@ cd "$root"
 actual=$(cargo tree --locked --prefix none --format '{p}' -i rsa@0.9.10)
 expected=$(printf '%s\n' \
   'rsa v0.9.10' \
-  'openidconnect v4.0.1' \
+  'openidconnect v4.1.0' \
   'identity v0.5.6')
 
 # The final package path is machine-local, so compare its stable name/version separately.

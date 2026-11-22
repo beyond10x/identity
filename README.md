@@ -51,7 +51,8 @@ four component checks. Green here is the bar for main.
 | brand | `bash scripts/check-brand.sh` |
 | secrets | `bash scripts/check-secrets.sh` |
 
-Rust 1.88, edition 2024, `unsafe_code = "forbid"`.
+Rust 1.89 or newer, edition 2024, `unsafe_code = "forbid"`. The gate and the image build use the
+rustc pinned in `rust-toolchain.toml`.
 
 The PostgreSQL arm runs against a real server and reports itself skipped when
 `IDENTITY_TEST_POSTGRES_URL` is unset:

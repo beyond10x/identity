@@ -1047,17 +1047,17 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        assert_eq!(
             resolve_subject_groups(&store, "tenant-dev", "human-1")
                 .await
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            Vec::<GroupRecord>::new()
         );
-        assert!(
+        assert_eq!(
             resolve_group_members(&store, "tenant-dev", "project-atlas")
                 .await
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            Vec::<MemberRecord>::new()
         );
 
         write_member(&store, "tenant-dev", &member("human-1", "human", None))
@@ -1122,17 +1122,17 @@ mod tests {
         write_group_member(&store, "tenant-dev", "project-atlas", "human-1")
             .await
             .unwrap();
-        assert!(
+        assert_eq!(
             resolve_subject_groups(&store, "tenant-other", "human-1")
                 .await
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            Vec::<GroupRecord>::new()
         );
-        assert!(
+        assert_eq!(
             resolve_group_members(&store, "tenant-other", "project-atlas")
                 .await
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            Vec::<MemberRecord>::new()
         );
         assert!(
             write_group_member(&store, "tenant-other", "project-atlas", "human-1")

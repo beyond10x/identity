@@ -4116,15 +4116,13 @@ mod tests {
             groups.groups_for("tenant-a", Some("operator@example.test")),
             vec!["operator", "platform-read"]
         );
-        assert!(
-            groups
-                .groups_for("tenant-b", Some("operator@example.test"))
-                .is_empty()
+        assert_eq!(
+            groups.groups_for("tenant-b", Some("operator@example.test")),
+            Vec::<String>::new()
         );
-        assert!(
-            groups
-                .groups_for("tenant-a", Some("other@example.test"))
-                .is_empty()
+        assert_eq!(
+            groups.groups_for("tenant-a", Some("other@example.test")),
+            Vec::<String>::new()
         );
         assert!(
             StaticGroupMemberships::new(vec![
@@ -4162,12 +4160,11 @@ mod tests {
             groups.groups_for("tenant-a", Some("operator@example.test")),
             vec!["operator", "org-member"]
         );
-        assert!(
-            groups
-                .groups_for("tenant-b", Some("person@example.test"))
-                .is_empty()
+        assert_eq!(
+            groups.groups_for("tenant-b", Some("person@example.test")),
+            Vec::<String>::new()
         );
-        assert!(groups.groups_for("tenant-a", None).is_empty());
+        assert_eq!(groups.groups_for("tenant-a", None), Vec::<String>::new());
     }
 
     #[test]
