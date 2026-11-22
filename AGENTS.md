@@ -167,6 +167,12 @@ The tag is the bare version — `0.2.0`, the version and nothing else (atlas § 
 a fully gated `main` commit. The full gate comes first; component steps alone are not enough. This
 repository has no `CHANGELOG.md`; if one is added, its heading is the version the tag carries.
 
+Pushing the tag runs `.github/workflows/release.yml`: it checks that the tag is the `main` tip and
+matches the workspace version, then publishes the GitHub release as the organization bot, or accepts
+a release the bot already published. A release is source only: no runtime image and no
+`release-manifest.json`. The runtime promotion that built them ran in `beyond10x/devcenter`, which
+is archived; 0.5.7 was the first release without them.
+
 ## Where work is tracked
 
 | What | Where |

@@ -33,7 +33,7 @@ jobs:
           workspace_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           test "$workspace_version" = "$GITHUB_REF_NAME"
 
-  promote:
+  publish:
     needs: validate
     runs-on: ubuntu-latest
     steps:
@@ -44,26 +44,18 @@ jobs:
           app-id: ${{ secrets.B10X_BOT_APP_ID }}
           private-key: ${{ secrets.B10X_BOT_PRIVATE_KEY }}
           owner: beyond10x
-          repositories: |
-            devcenter
-            identity
-      - name: Delegate the private runtime promotion
+          repositories: identity
+      - name: Publish the source release as the organization bot
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SOURCE_COMMIT: ${{ needs.validate.outputs.source-commit }}
           VERSION: ${{ github.ref_name }}
         run: |
-          gh workflow run promote-identity.yml \
-            --repo beyond10x/devcenter \
-            --ref main \
-            -f "version=${VERSION}" \
-            -f "source_commit=${SOURCE_COMMIT}"
-
-          for _ in $(seq 1 180); do
-            if gh release view "$VERSION" --repo beyond10x/identity >/dev/null 2>&1; then
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Identity runtime promotion did not publish release ${VERSION} within 15 minutes" >&2
-          exit 1
+          if gh release view "$VERSION" --repo beyond10x/identity >/dev/null 2>&1; then
+            author=$(gh release view "$VERSION" --repo beyond10x/identity --json author --jq .author.login)
+            test "$author" = "b10x-bot[bot]"
+            exit 0
+          fi
+          gh release create "$VERSION" --repo beyond10x/identity \
+            --verify-tag --target "$SOURCE_COMMIT" \
+            --title "Identity ${VERSION}" --generate-notes
