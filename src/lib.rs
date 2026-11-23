@@ -3109,6 +3109,13 @@ async fn upstream_callback(
     State(state): State<AppState>,
     Query(query): Query<UpstreamCallback>,
 ) -> Result<Response, HttpError> {
+    // Only a local-login build runs with no upstream provider; then there is no upstream sign-in
+    // to return from, and the route answers as one that does not exist.
+    if state.config.upstream_providers.is_empty() {
+        return Err(HttpError::missing(
+            "this Identity has no upstream identity provider",
+        ));
+    }
     if let Some(error) = query.error {
         return Ok((
             StatusCode::UNAUTHORIZED,
@@ -4080,6 +4087,103 @@ mod tests {
                 "{hint:?} is not a mailbox address"
             );
         }
+    }
+
+    /// The workstation login is the whole point of a feature build with no upstream provider: the
+    /// router serves the sign-in form, mints a code in the configured tenant for a typed mailbox,
+    /// and refuses the upstream callback outright instead of pretending a provider exists.
+    #[cfg(feature = "local-login")]
+    #[tokio::test]
+    async fn local_login_without_an_upstream_provider_serves_the_sign_in_form() {
+        use tower::ServiceExt as _;
+
+        let store = Store::in_memory().unwrap();
+        let mut config = config();
+        config.upstream_providers.clear();
+        let app = router(AppState::new(
+            Arc::new(config),
+            BTreeMap::new(),
+            openidconnect::reqwest::ClientBuilder::new()
+                .redirect(openidconnect::reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            store.clone(),
+        ));
+        let query = authorization_query();
+        let mut authorize = Url::parse("http://127.0.0.1:8080/oauth/authorize").unwrap();
+        authorize
+            .query_pairs_mut()
+            .append_pair("response_type", &query.response_type)
+            .append_pair("client_id", &query.client_id)
+            .append_pair("redirect_uri", &query.redirect_uri)
+            .append_pair("scope", &query.scope)
+            .append_pair("state", &query.state)
+            .append_pair("nonce", query.nonce.as_deref().unwrap())
+            .append_pair("code_challenge", &query.code_challenge)
+            .append_pair("code_challenge_method", &query.code_challenge_method);
+        let request = |uri: &str| {
+            axum::http::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+
+        let form = app
+            .clone()
+            .oneshot(request(&format!(
+                "/oauth/authorize?{}",
+                authorize.query().unwrap()
+            )))
+            .await
+            .unwrap();
+        assert_eq!(form.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(form.into_body(), MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains("Local development sign-in") && body.contains("name=\"login_hint\""),
+            "a feature build with no upstream provider serves the local sign-in form: {body}"
+        );
+
+        authorize
+            .query_pairs_mut()
+            .append_pair("login_hint", "person@example.test");
+        let signed_in = app
+            .clone()
+            .oneshot(request(&format!(
+                "/oauth/authorize?{}",
+                authorize.query().unwrap()
+            )))
+            .await
+            .unwrap();
+        let status = signed_in.status();
+        let Some(location) = signed_in
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+        else {
+            panic!("the local login redirects to the client, got {status}");
+        };
+        let code = Url::parse(location)
+            .unwrap()
+            .query_pairs()
+            .find(|(name, _)| name == "code")
+            .map(|(_, value)| value.into_owned())
+            .unwrap();
+        let authorization = store.take_code(&code).await.unwrap().unwrap();
+        assert_eq!(authorization.tenant_id, "tenant-dev");
+        assert_eq!(authorization.email.as_deref(), Some("person@example.test"));
+
+        let callback = app
+            .oneshot(request("/oauth/callback/upstream?code=c&state=s"))
+            .await
+            .unwrap();
+        assert_eq!(
+            callback.status(),
+            StatusCode::NOT_FOUND,
+            "with no upstream provider the upstream callback is not a route"
+        );
     }
 
     #[test]

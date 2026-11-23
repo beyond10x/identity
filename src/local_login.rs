@@ -1,8 +1,8 @@
 //! A sign-in for a loopback Identity that has no upstream provider.
 //!
-//! The local process stack runs Identity on `127.0.0.1` with placeholder upstream client
-//! credentials, so the ordinary browser flow cannot complete: there is no provider that would
-//! return an ID token. This module replaces exactly that one step. Everything after it is the
+//! The local process stack runs Identity on `127.0.0.1` with no upstream provider, or with
+//! placeholder upstream client credentials, so the ordinary browser flow cannot complete: there is
+//! no provider that would return an ID token. This module replaces exactly that one step. Everything after it is the
 //! deployed path unchanged — the same authorization code, the same `/oauth/token` exchange, the
 //! same opaque session row, the same group resolution from the deployment's static and default
 //! group configuration.
@@ -75,16 +75,17 @@ pub(crate) async fn complete(
     let email = normalize_email(login_hint)
         .map_err(|_| HttpError::invalid("sign in with a mailbox address"))?;
     // The deployment's own tenant resolution, consulted with no upstream claims at all: a
-    // deployment that requires an organization claim therefore resolves nothing and refuses.
-    let tenant_id = config
-        .upstream_providers
-        .first()
-        .map(|provider| &provider.organization_domain_policy)
-        .ok_or_else(|| HttpError::internal("no upstream provider configuration"))?
-        .resolve_tenant(&HashMap::new(), &config.tenant_id)
-        .ok_or_else(|| {
-            HttpError::denied("this Identity resolves a tenant from a verified upstream claim")
-        })?;
+    // deployment that requires an organization claim therefore resolves nothing and refuses. With
+    // no upstream provider there is no claim to require, and the configured tenant is the tenant.
+    let tenant_id = match config.upstream_providers.first() {
+        Some(provider) => provider
+            .organization_domain_policy
+            .resolve_tenant(&HashMap::new(), &config.tenant_id),
+        None => Some(config.tenant_id.clone()),
+    }
+    .ok_or_else(|| {
+        HttpError::denied("this Identity resolves a tenant from a verified upstream claim")
+    })?;
     let code = random_token(32).map_err(HttpError::internal)?;
     store
         .put_code(

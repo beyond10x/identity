@@ -147,9 +147,21 @@ optional `local-login` feature replaces exactly the step that has no counterpart
 asks which mailbox to sign in as and mints the ordinary authorization code. Everything after that
 is unchanged.
 
+A feature build needs no upstream provider: leave out every `IDENTITY_UPSTREAM_*` variable and it
+starts with the local sign-in only. A partly configured provider is still refused, and a default
+build still requires `IDENTITY_UPSTREAM_ISSUER`.
+
 ```bash
+IDENTITY_LISTEN=127.0.0.1:8080 \
+IDENTITY_PUBLIC_ORIGIN=http://127.0.0.1:8080 \
+IDENTITY_TENANT_ID=local \
+IDENTITY_AUDIENCE_REGISTRY_JSON='{"version":"identity.audiences/2","session":["urn:example:console"],"access":[{"audience":"urn:example:resource-api","scopes":["resource.read"]}]}' \
+IDENTITY_DATABASE_PATH="$PWD/target/identity-local/identity.sqlite3" \
 cargo run --locked --features local-login
 ```
+
+With a provider configured as well, it is discovered before the listener opens, as in a default
+build; it then serves only identity links, because `/oauth/authorize` signs in locally.
 
 Issuing a session for a mailbox somebody typed authenticates nobody, so **three independent rules
 refuse it in a deployment, and any one of them is sufficient**:

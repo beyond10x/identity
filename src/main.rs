@@ -51,6 +51,17 @@ async fn main() -> Result<()> {
     .timeout(Duration::from_secs(15))
     .build()
     .context("build OIDC HTTP client")?;
+    // A local-login build may name no upstream provider at all (`upstream_providers`); it then
+    // signs people in itself and has nothing to discover. A configured provider is discovered
+    // before the listener opens, in every build.
+    #[cfg(feature = "local-login")]
+    let upstreams = if config.upstream_providers.is_empty() {
+        info!("no upstream identity provider is configured; serving the local sign-in only");
+        std::collections::BTreeMap::new()
+    } else {
+        discover_upstreams(&config, &http_client).await?
+    };
+    #[cfg(not(feature = "local-login"))]
     let upstreams = discover_upstreams(&config, &http_client).await?;
     let store = match config.database_url.as_ref() {
         Some(url) => Store::connect_postgres(url.expose_secret()).await?,
@@ -191,6 +202,13 @@ fn upstream_providers() -> Result<Vec<UpstreamProvider>> {
         .ok()
         .filter(|value| !value.trim().is_empty());
     let Some(source) = source else {
+        // A loopback development build signs people in itself, so a workstation may leave the
+        // upstream provider out entirely. Only a configuration that sets none of the
+        // single-provider variables counts as that; a partial one still fails on what it lacks.
+        #[cfg(feature = "local-login")]
+        if no_single_upstream_variable_is_set() {
+            return Ok(Vec::new());
+        }
         return Ok(vec![UpstreamProvider {
             id: "default".to_owned(),
             label: "OpenID Connect".to_owned(),
@@ -244,6 +262,20 @@ fn upstream_providers() -> Result<Vec<UpstreamProvider>> {
             })
         })
         .collect()
+}
+
+#[cfg(feature = "local-login")]
+fn no_single_upstream_variable_is_set() -> bool {
+    [
+        "IDENTITY_UPSTREAM_ISSUER",
+        "IDENTITY_UPSTREAM_CLIENT_ID",
+        "IDENTITY_UPSTREAM_CLIENT_SECRET",
+        "IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM",
+        "IDENTITY_ORGANIZATION_TENANTS_JSON",
+        "IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS",
+    ]
+    .iter()
+    .all(|name| env::var_os(name).is_none())
 }
 
 #[derive(Deserialize)]
