@@ -2368,11 +2368,10 @@ mod tests {
         assert_eq!(created_state.as_deref(), Some("observed"));
     }
 
-    /// The reviewer's probe of PR 22: identical deliveries racing on the local store. It fails
-    /// until `SQLite` admission returns a real guard (branch `fix/sqlite-admission`), because the
-    /// repeat check and the insert are not held against each other on that store yet.
+    /// The reviewer's probe of PR 22: identical deliveries racing on the local store. The repeat
+    /// check and the insert run under the admission guard, so exactly one copy is stored; without
+    /// a real `SQLite` guard this stored duplicates in some rounds.
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    #[ignore = "needs fix/sqlite-admission"]
     async fn concurrent_identical_deliveries_store_one_row() {
         let state = app_state(Store::in_memory().unwrap());
         let person = signed_in(&state, super::PROFILE_AUDIENCE).await;
