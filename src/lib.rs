@@ -4012,6 +4012,27 @@ mod tests {
         }
     }
 
+    /// `main.rs` admits a non-https public origin only on `127.0.0.1`; the per-request guard must
+    /// be no looser, so a name the resolver maps and every other loopback literal are refused.
+    #[cfg(feature = "local-login")]
+    #[test]
+    fn local_login_refuses_every_origin_main_refuses() {
+        for origin in [
+            "http://localhost:8080/",
+            "http://127.0.0.2:8080/",
+            "http://[::1]:8080/",
+        ] {
+            let config = Config {
+                public_origin: Url::parse(origin).unwrap(),
+                ..config()
+            };
+            assert!(
+                !local_login::admitted(&config),
+                "{origin} is refused by main.rs, so the local login must refuse it too"
+            );
+        }
+    }
+
     #[cfg(feature = "local-login")]
     #[tokio::test]
     async fn deployed_configuration_refuses_the_local_login_path() {

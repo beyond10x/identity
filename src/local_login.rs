@@ -25,6 +25,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::net::Ipv4Addr;
 
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -44,14 +45,13 @@ const SUBJECT_PREFIX: &str = "local-login:";
 /// machine under a name it does not publish, and a loopback listener publishing an HTTPS origin is
 /// a deployment behind a proxy. Only the pair describes a process that nothing but this machine can
 /// reach.
+///
+/// The origin host is exactly the IP literal `127.0.0.1`, the one non-https origin `main.rs`
+/// admits: never a name a resolver maps, and never looser than the startup check.
 pub(crate) fn admitted(config: &Config) -> bool {
     config.listen.ip().is_loopback()
         && config.public_origin.scheme() == "http"
-        && config.public_origin.host().is_some_and(|host| match host {
-            Host::Ipv4(address) => address.is_loopback(),
-            Host::Ipv6(address) => address.is_loopback(),
-            Host::Domain(name) => name == "localhost",
-        })
+        && config.public_origin.host() == Some(Host::Ipv4(Ipv4Addr::LOCALHOST))
 }
 
 /// Completes an authorization request without an upstream provider.
