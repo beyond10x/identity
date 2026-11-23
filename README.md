@@ -5,9 +5,9 @@ principal identity, opaque CLI sessions, the server-side credential store, the o
 directory, and the personal collaboration profile.
 
 Without it, every product service runs its own upstream OAuth, keeps its own copy of who works
-here, and defines what a user identifier means. Upstream provider tokens never leave this process.
-A user key is always `(tenant, sub)` and never a bare subject. Every consumer resolves an authority
-bound to one exact registered audience.
+here and defines what a user identifier means. Upstream provider tokens never leave this process and
+never reach a consumer. A user key is always `(tenant, sub)` and never a bare subject. Every consumer
+resolves an authority bound to one exact registered audience.
 
 ## Where it sits
 
@@ -16,14 +16,13 @@ Relying parties resolve sessions or five-minute opaque access credentials throug
 audience registrations. Identity contains no relying-party endpoint, provider integration, product
 name, or capability vocabulary.
 
-Upstream provider credentials never reach a consumer. A consumer's registration decides what it
-holds:
+A consumer's registration decides what it holds:
 
 | consumer | holds | resolves it at |
 |---|---|---|
-| an in-cluster application registered as a session audience | the person's Identity session, presented with the exact audience | `GET /v1/session-authority` |
+| an in-cluster application registered as a session audience | the person's Identity session, presented with the exact audience in the `x-b10x-audience` header | `GET /v1/session-authority` |
 | a caller of the directory or profile routes | the person's Identity session, presented with the route's fixed audience | `/v1/directory/…`, `/v1/profile/…` |
-| a relying party registered as an access audience | a five-minute access credential for that one audience and scope set, never the session | `GET /v1/access-authority` |
+| a relying party registered as an access audience | a five-minute access credential for that one audience and scope set, never the session; an authenticated session mints it through `POST /v1/access-token`, and a public PKCE client receives it from `/oauth/authorize` with the exact `resource` | `GET /v1/access-authority` |
 
 Resolving a session returns the person's authority for that audience. It never mints a reusable
 token and never reaches another subject. A consumer's scope is a coarse gate only, so the consumer
@@ -31,8 +30,8 @@ must still run its own admission before an effect-bearing operation.
 
 ## Status
 
-**The deployable human-login and relying-party authority slice.** The source is public. Its crates
-remain deployment components and are not published to crates.io.
+Identity is the deployable human-login and relying-party authority slice. The source is public. The
+crates are deployment components and are not published to crates.io.
 
 | area | state |
 |---|---|
@@ -45,8 +44,8 @@ remain deployment components and are not published to crates.io.
 
 ## Build, test, run
 
-The gate is **`bash scripts/gate.sh`**. It runs tests and clippy in both feature postures, plus
-three component checks, and main requires it green.
+Main requires `bash scripts/gate.sh` green. It runs tests and clippy in both feature postures plus
+three component checks:
 
 | step | command |
 |---|---|
@@ -62,8 +61,8 @@ three component checks, and main requires it green.
 The former-brand fence is not a step here: it runs organization-wide as Atlas's
 `scripts/check-org-brand.sh`.
 
-Rust 1.89 or newer, edition 2024, `unsafe_code = "forbid"`. The gate and the image build use the
-rustc pinned in `rust-toolchain.toml`.
+The crate needs Rust 1.89 or newer, uses edition 2024 and sets `unsafe_code = "forbid"`. The gate and
+the image build use the rustc pinned in `rust-toolchain.toml`.
 
 The PostgreSQL arm runs against a real server and reports itself skipped when
 `IDENTITY_TEST_POSTGRES_URL` is unset:
@@ -74,8 +73,8 @@ IDENTITY_TEST_POSTGRES_URL='postgresql://user:password@host:5432/identity?sslmod
 ```
 
 `check-audit.sh` carries one transitive exception: `openidconnect 4.1.0` pulls `rsa 0.9`
-unconditionally. This service uses that crate only to verify signatures with public JWKs and never holds
-an RSA private key. The script first proves the dependency path is still exactly
+unconditionally. This service uses that crate only to verify signatures with public JWKs and never
+holds an RSA private key. The script first proves the dependency path is still exactly
 `identity -> openidconnect -> rsa`, and any drift forces re-review. The exception goes when the
 upstream dependency stops carrying that crate.
 
@@ -98,12 +97,12 @@ IDENTITY_DATABASE_PATH=/tmp/identity/private/identity.sqlite3 \
 cargo run --locked
 ```
 
-`IDENTITY_UPSTREAM_CA_BUNDLE` optionally names a PEM certificate bundle of additional trusted roots
-for upstream OIDC HTTPS requests. It supports private certificate authorities, including disposable
-local deployments, and certificate and hostname verification stay on. The file must contain
-certificates and be no larger than 1 MiB. An unreadable or invalid configured bundle refuses
-startup. Omit the variable to use the normal built-in roots. It applies to every configured upstream
-provider and does not enable the development login route.
+`IDENTITY_UPSTREAM_CA_BUNDLE` optionally names a PEM bundle of additional trusted roots for upstream
+OIDC HTTPS requests, such as a private certificate authority or a disposable local deployment.
+Certificate and hostname verification stay on. The file must contain certificates and be no larger
+than 1 MiB. An unreadable or invalid configured bundle refuses startup. Without the variable the
+built-in roots apply. The bundle covers every configured upstream provider and does not enable the
+development login route.
 
 The three `IDENTITY_UPSTREAM_*` variables remain the single-provider compatibility surface. A
 deployment with several providers instead supplies a credential-free registry whose
@@ -113,18 +112,18 @@ deployment with several providers instead supplies a credential-free registry wh
 IDENTITY_UPSTREAM_PROVIDERS_JSON='[{"id":"one","label":"Provider one","issuer":"https://accounts.example.com","clientId":"client-one","clientSecretEnv":"IDENTITY_PROVIDER_ONE_SECRET","organizationDomainClaim":"organization","organizationTenants":[{"claimValue":"example.com","tenantId":"local"}]}]'
 ```
 
-Provider ids are selected through the standard authorization request's `identity_provider`
-parameter. When more than one provider is configured, a browser request that omits the selection
-receives an Identity-owned chooser that preserves the exact authorization request. An explicit
-unknown selection is refused. Login state binds the provider id, so a callback code can be
-exchanged only against the issuer and client that started it.
+The authorization request selects a provider through its `identity_provider` parameter. When more
+than one provider is configured, a browser request that omits the selection receives an
+Identity-owned chooser that preserves the exact authorization request. An explicit unknown
+selection is refused. Login state binds the provider id, so a callback code can be exchanged only
+against the issuer and client that started it.
 
 Additional identities are linked only from a live Identity session through `/v1/identity-links`.
 Email equality never links people, and the final login method cannot be removed.
 
 A deployment may admit a confidential service to exchange one exact access authority for another.
-The seam is disabled by default. A caller declaration contains only the environment-variable name.
-The secret must be injected separately from deployment-owned secret material:
+The exchange is disabled by default. A caller declaration holds only the name of an environment
+variable, and the secret is injected separately from deployment-owned secret material:
 
 ```bash
 IDENTITY_TRUSTED_ACCESS_CALLERS_JSON='[{"id":"relying-service","secretEnv":"IDENTITY_RELYING_SERVICE_EXCHANGE_SECRET"}]'
@@ -134,9 +133,8 @@ IDENTITY_ACCESS_EXCHANGE_POLICIES_JSON='[{"callerId":"relying-service","sourceAu
 `POST /v1/access-exchange` requires the source access token in `Authorization` and the confidential
 caller in `x-b10x-access-exchange-caller` plus `x-b10x-access-exchange-secret`. Identity binds the
 request to the exact policy, requires a human self-actor, recomputes current groups, re-applies the
-target audience policy, and returns the ordinary five-minute verifier-only target credential.
-
-The calling service must never forward that credential to the public client whose source token it
+target audience policy, and returns the ordinary five-minute verifier-only target credential. The
+calling service must never forward that credential to the public client whose source token it
 exchanged.
 
 Production configuration refuses a non-HTTPS public origin. Plain HTTP is accepted only for the
@@ -165,27 +163,24 @@ cargo run --locked --features local-login
 With a provider configured as well, it is discovered before the listener opens, as in a default
 build. The provider then serves only identity links, because `/oauth/authorize` signs in locally.
 
-Issuing a session for a mailbox somebody typed authenticates nobody, so **three independent rules
-refuse it in a deployment, and any one of them is sufficient**:
+Issuing a session for a mailbox somebody typed authenticates nobody. Three independent rules refuse
+it in a deployment, and any one of them is sufficient:
 
-- **The release profile refuses to compile it.** `src/lib.rs` raises `compile_error!` when the
-  feature is combined with `debug_assertions` off, and again whenever the profile optimizes, through
-  the `optimized_build` cfg that `build.rs` derives from `OPT_LEVEL`. So
-  `RUSTFLAGS='-C debug-assertions=yes' cargo build --release` cannot include the route.
-- **The image selects no feature.** `Dockerfile` runs `cargo build --locked --release` with no
-  `--features`.
-- **A feature build refuses a reachable address.** The process exits before binding unless it both
-  listens on a loopback address and publishes a loopback HTTP origin, and the request path checks
-  the same predicate again.
+| rule | enforced by |
+|---|---|
+| the release profile refuses to compile it | `src/lib.rs` raises `compile_error!` when the feature is combined with `debug_assertions` off, and again whenever the profile optimizes, through the `optimized_build` cfg that `build.rs` derives from `OPT_LEVEL` |
+| the image selects no feature | `Dockerfile` runs `cargo build --locked --release` with no `--features` |
+| a feature build refuses a reachable address | the process exits before binding unless it both listens on a loopback address and publishes a loopback HTTP origin; the request path checks the same predicate again |
 
-`scripts/check-local-login-refused.sh` proves the first two.
+So `RUSTFLAGS='-C debug-assertions=yes' cargo build --release` cannot include the route.
+`scripts/check-local-login-refused.sh` proves the first two rules.
 
 ## Deploying
 
-This repository ships no chart or manifest. `Dockerfile` builds the image: distroless, the
-`nonroot` user, port 8080, volume `/var/lib/identity`. Startup validates the whole environment
-below, fetches every upstream provider's OIDC discovery document, opens the store, and only then
-binds the listener. Any failure exits non-zero.
+`Dockerfile` builds the image: distroless, the `nonroot` user, port 8080, volume
+`/var/lib/identity`. Startup validates the whole environment below, fetches every upstream
+provider's OIDC discovery document, opens the store, and only then binds the listener. Any failure
+exits non-zero.
 
 Required:
 
@@ -222,20 +217,12 @@ Optional:
 
 Constraints ([`AGENTS.md`](AGENTS.md) invariant 7 and the safety envelope):
 
-- **One replica, replacement rollouts**, on either backend. Capacity check-and-insert admission is
-  serialized inside one process. A second process, including the overlap of a rolling update, is
-  not proven safe.
-- **The SQLite directory** must be a non-symlink directory owned by the process user with no group
-  or other permission bit (`0700` or stricter). Identity creates it at `0700` when it is missing.
-  An existing database must be a non-symlink regular file owned by the same user with no permission
-  beyond `0600`. Identity sets it to `0600` on every start. A volume that grants group access is
-  refused.
-- **Probes:** `GET /livez` for liveness, `GET /readyz` for readiness (`503` while the store is
-  unavailable).
-- **Configuration changes end sessions.** The issuer, tenant, CLI client, providers with their
-  organization policy, web clients, audience registry and access-exchange policies form the session
-  configuration generation. Changing any of them requires every person to log in again. Group
-  assignments and secrets are not part of it.
+| constraint | rule |
+|---|---|
+| one replica, replacement rollouts | Applies on either backend. Capacity check-and-insert admission is serialized inside one process. A second process, including the overlap of a rolling update, is not proven safe. |
+| SQLite directory | A non-symlink directory owned by the process user with no group or other permission bit (`0700` or stricter). Identity creates it at `0700` when it is missing. A volume that grants group access is refused. |
+| SQLite file | An existing database must be a non-symlink regular file owned by the same user with no permission beyond `0600`. Identity sets it to `0600` on every start. |
+| configuration changes end sessions | The issuer, tenant, CLI client, providers with their organization policy, web clients, audience registry and access-exchange policies form the session configuration generation. Changing any of them requires every person to log in again. Group assignments and secrets are not part of it. |
 
 ## Routes
 
@@ -258,18 +245,19 @@ Constraints ([`AGENTS.md`](AGENTS.md) invariant 7 and the safety envelope):
 ### Audiences
 
 Every authority-bearing call names **exactly one** audience, verbatim. The vocabulary is
-wire-visible: it is minted into issued tokens and required by every relying party. It moves only
-as a protocol change with a migration. Extensible relying parties are admitted by the required,
-versioned `IDENTITY_AUDIENCE_REGISTRY_JSON`. Adding an audience is deployment configuration after
-the relying parties have released the same exact byte.
+wire-visible: it is minted into issued tokens and required by every relying party, so it moves only
+as a protocol change with a migration. The required, versioned `IDENTITY_AUDIENCE_REGISTRY_JSON`
+admits extensible relying parties. Adding an audience is deployment configuration after the relying
+parties have released the same exact byte.
+
+Registered access and session audiences are reached as the table in [Where it sits](#where-it-sits)
+shows. The fixed audiences are:
 
 | audience | reached by |
 |---|---|
-| a registered access audience | an authenticated session via `POST /v1/access-token`, or a public PKCE client through `/oauth/authorize` with the exact `resource`; the relying party resolves either credential at `GET /v1/access-authority` |
-| a registered session audience | an in-cluster application, in the `x-b10x-audience` header on `GET /v1/session-authority` |
 | `urn:b10x:directory` | every `/v1/directory/…` route, in `x-b10x-audience` |
 | `urn:b10x:profile` | the person's own control surface |
-| `urn:b10x:profile-projection` | the learning consumer's — it reaches the projection and the learning write, and nothing else: the durable store, the withheld statements and the lifecycle controls are not addressable under it |
+| `urn:b10x:profile-projection` | the learning consumer: it reaches the projection and the learning write, and nothing else. The durable store, the withheld statements and the lifecycle controls are not addressable under it |
 
 The registry document is closed and deterministic:
 
@@ -290,16 +278,15 @@ authenticated subject. An exact `groupScopes` entry can expand issuance for subj
 verified group. Identity only enforces the closed registration. The relying party owns the meaning
 of those bytes and every operation-level authorization decision.
 
-Unknown versions and fields,
-duplicate identifiers or rules, malformed names, unregistered audiences and unregistered scopes are
-refused. The canonical registry contributes to the session configuration generation, so changing it
-requires a new login.
+Unknown versions and fields, duplicate identifiers or rules, malformed names, unregistered
+audiences and unregistered scopes are refused. The canonical registry is part of the session
+configuration generation, so changing it requires a new login.
 
-The standard authorization-server document advertises no dynamic client registration.
-A deployment registers one public client ID. Its loopback callback accepts an ephemeral port, and
-PKCE S256 is mandatory. An OAuth resource authorization never creates a reusable browser session:
-the one-use code is bound to its exact registered audience and scope and exchanges directly for the
-same five-minute access-token authority used by `/v1/access-token`.
+The standard authorization-server document advertises no dynamic client registration. A deployment
+registers one public client ID. Its loopback callback accepts an ephemeral port, and PKCE S256 is
+mandatory. An OAuth resource authorization never creates a reusable browser session: the one-use
+code is bound to its exact registered audience and scope and exchanges directly for the same
+five-minute access-token authority used by `/v1/access-token`.
 
 The person may see exactly what a consumer is given. A consumer may see nothing else.
 
@@ -311,46 +298,48 @@ credentials use `identity_access_v1_`. Callers must treat both as indivisible be
 resolved authority vocabulary is product-neutral: `tenant_id` and `principal_kind` carry the
 tenant and actor kind without an inherited product namespace.
 
-Every credential table has a finite row cap, and so do the directory and the profile: 100 000
-principals and 10 000 groups per tenant, 512 members per group, 512 groups per subject, 512
-statements per subject, 200 000 statements per tenant, 512 characters of statement content, 64
-excluded sources. Listings are capped and are not paginated.
+The credential tables, the directory and the profile have finite row caps. Listings are capped and
+are not paginated.
+
+| limit | cap |
+|---|---|
+| principals per tenant | 100 000 |
+| groups per tenant | 10 000 |
+| members per group | 512 |
+| groups per subject | 512 |
+| statements per subject | 512 |
+| statements per tenant | 200 000 |
+| characters of statement content | 512 |
+| excluded sources | 64 |
 
 ## The rules that shape the code
 
 The full statements are in [`AGENTS.md`](AGENTS.md).
 
-- **Tenant is resolved from a cryptographically verified upstream claim**, before any code or
-  session exists. A provider resolves it in one of three modes:
-  1. **Exact mapping** (`IDENTITY_ORGANIZATION_TENANTS_JSON`, or a provider's
-     `organizationTenants`): the claim value maps to its `tenantId`. Suffix matching, email domains,
-     request hints and `IDENTITY_TENANT_ID` are never fallbacks.
-  2. **No organization claim configured**: every login of that provider gets `IDENTITY_TENANT_ID`.
-  3. **Legacy base-domain allowlist** (`IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS`, mutually
-     exclusive with the mapping): a claim equal to a listed domain or ending in `.` plus it gets
-     `IDENTITY_TENANT_ID`.
+Tenant is resolved from a cryptographically verified upstream claim, before any code or session
+exists. A provider resolves it in one of three modes:
 
-  Modes 2 and 3 are single-tenant compatibility modes. Unknown, duplicate, non-string and unmapped
-  claims fail closed. See
-  [the tenant-resolution decision](docs/decisions/0001-verified-organization-tenant-resolution.md).
-- **Nothing reusable is stored in the clear.** Authorization codes, sessions and access tokens are
-  stored only as SHA-256 verifiers. Provider access and refresh tokens are never persisted.
-- **Sessions are bound to issuer, tenant and configuration generation.** Changing the
-  authority-defining configuration requires a new login.
-- **A directory group carries no authority.** Only the deployment-configured static group
-  assignments reach an authority response. Adding a principal to a directory group grants nothing.
-  Directory writes require the static group `identity-directory-admin`, so administration is
-  deployment configuration and can never be granted from inside the directory.
-- **Groups are flat and membership is direct**, one bounded indexed query with no recursion and no
-  transitive closure. Hierarchy belongs to the collaboration product.
-- **An inference does not become a confirmation by itself.** The profile learning path admits only
-  `observed` and `inferred`. The only transition into `confirmed` is an explicit act by the person.
-- **Secret material never enters a profile projection.** Content and source references are screened
-  for credential markers, vendor prefixes, JWT shape, URL user info and long opaque tokens, on
-  write and again when a snapshot is built. A row that arrived by another route therefore still
-  cannot reach a model.
-- **Schema changes are additive only.** Every statement is `CREATE … IF NOT EXISTS`. An older
-  binary keeps working against a newer schema.
+1. **Exact mapping** (`IDENTITY_ORGANIZATION_TENANTS_JSON`, or a provider's `organizationTenants`):
+   the claim value maps to its `tenantId`. Suffix matching, email domains, request hints and
+   `IDENTITY_TENANT_ID` are never fallbacks.
+2. **No organization claim configured**: every login of that provider gets `IDENTITY_TENANT_ID`.
+3. **Legacy base-domain allowlist** (`IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS`, mutually
+   exclusive with the mapping): a claim equal to a listed domain or ending in `.` plus it gets
+   `IDENTITY_TENANT_ID`.
+
+Modes 2 and 3 are single-tenant compatibility modes. Unknown, duplicate, non-string and unmapped
+claims fail closed. See
+[the tenant-resolution decision](docs/decisions/0001-verified-organization-tenant-resolution.md).
+
+| rule | statement |
+|---|---|
+| nothing reusable is stored in the clear | Authorization codes, sessions and access tokens are stored only as SHA-256 verifiers. Provider access and refresh tokens are never persisted. |
+| sessions are bound to issuer, tenant and configuration generation | Changing the authority-defining configuration requires a new login. |
+| a directory group carries no authority | Only the deployment-configured static group assignments reach an authority response. Adding a principal to a directory group grants nothing. Directory writes require the static group `identity-directory-admin`, so administration is deployment configuration and can never be granted from inside the directory. |
+| groups are flat and membership is direct | One bounded indexed query, with no recursion and no transitive closure. Hierarchy belongs to the collaboration product. |
+| an inference does not become a confirmation by itself | The profile learning path admits only `observed` and `inferred`. The only transition into `confirmed` is an explicit act by the person. |
+| secret material never enters a profile projection | Content and source references are screened for credential markers, vendor prefixes, JWT shape, URL user info and long opaque tokens, on write and again when a snapshot is built. A row that arrived by another route therefore still cannot reach a model. |
+| schema changes are additive only | Every statement is `CREATE … IF NOT EXISTS`. An older binary keeps working against a newer schema. |
 
 ## Layout
 
