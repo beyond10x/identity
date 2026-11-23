@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-07T00:32:54Z",
+  "actor": "human:timo",
+  "artifact": "story:upstream-ca-bundle",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "repository gate including real upstream HTTPS trust regression",
+    "reference": "local-evidence:identity-gate-2"
+  }
+}

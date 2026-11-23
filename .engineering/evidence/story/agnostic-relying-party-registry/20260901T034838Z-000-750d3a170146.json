@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T03:48:38Z",
+  "actor": "human:timo",
+  "artifact": "story:agnostic-relying-party-registry",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh",
+    "reference": "src/lib.rs"
+  }
+}

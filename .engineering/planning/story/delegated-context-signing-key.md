@@ -1,11 +1,13 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:delegated-context-signing-key
 kind: story
 status: archived
 title: Sign a delegated-context assertion substrate can verify offline
 summary: Substrate ADR 0011 needs an EdDSA-signed, audience-scoped assertion; identity holds no signing key and admits one audience.
 revision: 5
+transitions:
+- {from: "draft", to: "archived", at: "2026-09-01T03:46:24Z", actor: "human:timo", revision: 5, imported: true}
 ---
 ## Why
 

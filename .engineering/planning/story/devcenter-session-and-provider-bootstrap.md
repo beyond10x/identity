@@ -1,11 +1,13 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:devcenter-session-and-provider-bootstrap
 kind: story
 status: archived
 title: Issue Devcenter sessions without treating provider credentials as identity
 summary: After M2, register Devcenter as a relying party and define a fail-closed provider-bootstrap handoff that ends in an Identity session.
 revision: 3
+transitions:
+- {from: "draft", to: "archived", at: "2026-09-01T03:46:24Z", actor: "human:timo", revision: 3, imported: true}
 ---
 ## Outcome
 

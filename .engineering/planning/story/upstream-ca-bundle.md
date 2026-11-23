@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:upstream-ca-bundle
 kind: story
 status: implemented
@@ -14,6 +14,10 @@ scope:
 - confidence: cited
   path: src/upstream_tls.rs
 revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-09-06T21:55:20Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-06T21:55:20Z", actor: "human:timo", revision: 5, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-07T00:32:54Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1}}, imported: true}
 ---
 ## Outcome
 

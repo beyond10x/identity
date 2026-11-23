@@ -1,11 +1,15 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:agnostic-relying-party-registry
 kind: story
 status: implemented
 title: Keep Identity agnostic of relying parties
 summary: Replace compiled downstream policy and discovery with generic deployment-owned registration.
 revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-09-01T03:46:24Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-01T03:46:24Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-01T03:48:39Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}, imported: true}
 ---
 ## Outcome
 

@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T00:01:10Z",
+  "actor": "human:timo",
+  "artifact": "story:audience-registry",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "docker build identity:0.2.0",
+    "reference": "Dockerfile"
+  }
+}
