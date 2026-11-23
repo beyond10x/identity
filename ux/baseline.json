@@ -1,0 +1,141 @@
+{
+  "about": "Identity docs page https://beyond10x.github.io/docs/identity/, measured 2026-11-23 in R-01 at source e5c4e873323580945aee7dd2b8941180d644db3e. Values are maxima over the gating viewports (1280x800, 390x844) x themes (light, dark); all lower is better. 9999 = not reached. Known: source-link keyboard.tabs is 19 from a harness that never opened the phone TOC (review-report T1); the review measured 21 at 390x844. The next run with the fixed harness sets it.",
+  "scenarios": {
+    "page": {
+      "layout.doc_hscroll_px": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.inner_hscroll": {
+        "value": 8,
+        "tolerance": 0
+      },
+      "layout.tables_over_column": {
+        "value": 3,
+        "tolerance": 0
+      },
+      "layout.code_hscroll": {
+        "value": 5,
+        "tolerance": 0
+      },
+      "layout.long_cells": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "always_visible.misses": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "axe.serious_nodes": {
+        "value": 141,
+        "tolerance": 0
+      },
+      "keyboard.focus_obscured": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "source.code_fences_without_language": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "run-locally": {
+      "screen_only.actions": {
+        "value": 2,
+        "tolerance": 0.05
+      },
+      "screen_only.looks": {
+        "value": 3,
+        "tolerance": 0.05
+      },
+      "glance_cost.max": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "keyboard.tabs": {
+        "value": 26,
+        "tolerance": 0.05
+      }
+    },
+    "token-route": {
+      "screen_only.actions": {
+        "value": 3,
+        "tolerance": 0.05
+      },
+      "screen_only.looks": {
+        "value": 4,
+        "tolerance": 0.05
+      },
+      "glance_cost.max": {
+        "value": 3,
+        "tolerance": 0
+      },
+      "keyboard.tabs": {
+        "value": 39,
+        "tolerance": 0.05
+      }
+    },
+    "local-login-refuses": {
+      "screen_only.actions": {
+        "value": 2,
+        "tolerance": 0.05
+      },
+      "screen_only.looks": {
+        "value": 3,
+        "tolerance": 0.05
+      },
+      "glance_cost.max": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "keyboard.tabs": {
+        "value": 36,
+        "tolerance": 0.05
+      }
+    },
+    "invariants": {
+      "screen_only.actions": {
+        "value": 18,
+        "tolerance": 0.05
+      },
+      "screen_only.looks": {
+        "value": 19,
+        "tolerance": 0.05
+      },
+      "glance_cost.max": {
+        "value": 3,
+        "tolerance": 0
+      },
+      "keyboard.tabs": {
+        "value": 43,
+        "tolerance": 0.05
+      }
+    },
+    "source-link": {
+      "screen_only.actions": {
+        "value": 1,
+        "tolerance": 0.05
+      },
+      "screen_only.looks": {
+        "value": 2,
+        "tolerance": 0.05
+      },
+      "glance_cost.max": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "keyboard.tabs": {
+        "value": 19,
+        "tolerance": 0.05
+      }
+    }
+  },
+  "tolerances": {
+    "counts": 0,
+    "steps": 0.05
+  }
+}

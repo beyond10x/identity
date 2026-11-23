@@ -1,0 +1,36 @@
+{
+  "page": "/docs/identity/",
+  "anchors": ["run-locally", "token-route"],
+  "tasks": [
+    {
+      "id": "run-locally",
+      "label": "find the command to run Identity locally",
+      "target": {"kind": "firstCodeAfter", "heading": "running it locally|run(ning)? .*locally"},
+      "keywords": "running it locally|run locally|quick ?start"
+    },
+    {
+      "id": "token-route",
+      "label": "find the route that issues tokens",
+      "target": {"kind": "cellContaining", "heading": "^routes$", "text": "/oauth/token"},
+      "keywords": "routes?|tokens?"
+    },
+    {
+      "id": "local-login-refuses",
+      "label": "find what local-login refuses",
+      "target": {"kind": "textContaining", "heading": "workstation|local.?login", "text": "refuse"},
+      "keywords": "workstation|local.?login|sign(ing)? in"
+    },
+    {
+      "id": "invariants",
+      "label": "find the invariants section",
+      "target": {"kind": "heading", "heading": "invariant|rules that shape"},
+      "keywords": "invariants?"
+    },
+    {
+      "id": "source-link",
+      "label": "find the source link",
+      "target": {"kind": "linkHref", "href": "https://github.com/beyond10x/identity"},
+      "keywords": "source|github|readme"
+    }
+  ]
+}

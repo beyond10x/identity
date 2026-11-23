@@ -1,0 +1,430 @@
+{
+  "project": "390x844-dark",
+  "viewport": "390x844",
+  "theme": "dark",
+  "gating": true,
+  "url": "https://beyond10x.github.io/docs/identity/",
+  "resolved": [
+    {
+      "id": "run-locally",
+      "found": true,
+      "heading": "running-it-locally",
+      "desc": "div.language-bash.codeBlockContainer_Ckt0.theme-code-block \"IDENTITY_LISTEN=127.0.0.1:8080 \\IDENTITY_PUBLIC_OR\""
+    },
+    {
+      "id": "token-route",
+      "found": true,
+      "heading": "routes",
+      "desc": "td \"GET /oauth/authorize, GET /oauth/callback/upstream\""
+    },
+    {
+      "id": "local-login-refuses",
+      "found": true,
+      "heading": "signing-in-on-a-workstation",
+      "desc": "p \"Issuing a session for a mailbox somebody typed aut\""
+    },
+    {
+      "id": "invariants",
+      "found": true,
+      "heading": "the-rules-that-shape-the-code",
+      "desc": "h2#the-rules-that-shape-the-code.anchor.anchorTargetStickyNavbar_Vzrq \"The rules that shape the code\""
+    },
+    {
+      "id": "source-link",
+      "found": true,
+      "heading": null,
+      "desc": "a \"identity/README.md\""
+    }
+  ],
+  "layout": {
+    "viewportWidth": 390,
+    "column": 358,
+    "docHScrollPx": 0,
+    "pageOverflow": [],
+    "clipped": [],
+    "innerScrollers": [
+      {
+        "container": "div.b10x-table-wrap \"stepcommandtestscargo test --workspace --lockedtes\"",
+        "overflowPx": 509
+      },
+      {
+        "container": "pre.prism-code.language-bash.codeBlock_bY9V \"IDENTITY_TEST_POSTGRES_URL='postgresql://user:pass\"",
+        "overflowPx": 404
+      },
+      {
+        "container": "pre.prism-code.language-bash.codeBlock_bY9V \"IDENTITY_LISTEN=127.0.0.1:8080 \\IDENTITY_PUBLIC_OR\"",
+        "overflowPx": 1642
+      },
+      {
+        "container": "pre.prism-code.language-bash.codeBlock_bY9V \"IDENTITY_UPSTREAM_PROVIDERS_JSON='[{\"id\":\"one\",\"la\"",
+        "overflowPx": 2049
+      },
+      {
+        "container": "pre.prism-code.language-bash.codeBlock_bY9V \"IDENTITY_TRUSTED_ACCESS_CALLERS_JSON='[{\"id\":\"rely\"",
+        "overflowPx": 1658
+      },
+      {
+        "container": "div.b10x-table-wrap \"routeforGET /livezprocess liveness onlyGET /readyz\"",
+        "overflowPx": 167
+      },
+      {
+        "container": "div.b10x-table-wrap \"audiencereached bya registered access audiencean a\"",
+        "overflowPx": 152
+      },
+      {
+        "container": "pre.prism-code.language-json.codeBlock_bY9V \"{ \"version\": \"identity.audiences/2\", \"session\": [\"\"",
+        "overflowPx": 244
+      }
+    ],
+    "tables": [
+      {
+        "first": "areastate",
+        "width": 358,
+        "column": 358,
+        "overColumn": false
+      },
+      {
+        "first": "stepcommand",
+        "width": 867,
+        "column": 358,
+        "overColumn": true
+      },
+      {
+        "first": "routefor",
+        "width": 525,
+        "column": 358,
+        "overColumn": true
+      },
+      {
+        "first": "audiencereached by",
+        "width": 510,
+        "column": 358,
+        "overColumn": true
+      },
+      {
+        "first": "pathholds",
+        "width": 358,
+        "column": 358,
+        "overColumn": false
+      }
+    ],
+    "codeBlocks": [
+      {
+        "lang": "language-bash",
+        "hScrollPx": 404,
+        "widthRatio": 2.13
+      },
+      {
+        "lang": "language-bash",
+        "hScrollPx": 1642,
+        "widthRatio": 5.61
+      },
+      {
+        "lang": "language-bash",
+        "hScrollPx": 2049,
+        "widthRatio": 6.76
+      },
+      {
+        "lang": "language-bash",
+        "hScrollPx": 1658,
+        "widthRatio": 5.66
+      },
+      {
+        "lang": "language-bash",
+        "hScrollPx": 0,
+        "widthRatio": 1
+      },
+      {
+        "lang": "language-json",
+        "hScrollPx": 244,
+        "widthRatio": 1.69
+      }
+    ],
+    "longCells": [
+      {
+        "chars": 69,
+        "height": 355,
+        "text": "GET /oauth/authorize, GET /oauth/callback/upstream, POST /oa"
+      },
+      {
+        "chars": 122,
+        "height": 355,
+        "text": "the browser leg and the one-use code exchange; a registered "
+      },
+      {
+        "chars": 24,
+        "height": 300,
+        "text": "POST /v1/access-exchange"
+      },
+      {
+        "chars": 113,
+        "height": 300,
+        "text": "confidentially narrow one live human access token into an ex"
+      },
+      {
+        "chars": 15,
+        "height": 218,
+        "text": "POST /v1/logout"
+      },
+      {
+        "chars": 71,
+        "height": 218,
+        "text": "revokes the session and every outstanding access token for t"
+      },
+      {
+        "chars": 22,
+        "height": 218,
+        "text": "GET /v1/identity-links"
+      },
+      {
+        "chars": 64,
+        "height": 218,
+        "text": "lists the current person's explicitly linked upstream identi"
+      },
+      {
+        "chars": 28,
+        "height": 246,
+        "text": "a registered access audience"
+      },
+      {
+        "chars": 198,
+        "height": 246,
+        "text": "an authenticated session via POST /v1/access-token, or a pub"
+      },
+      {
+        "chars": 27,
+        "height": 245,
+        "text": "urn:b10x:profile-projection"
+      },
+      {
+        "chars": 192,
+        "height": 245,
+        "text": "the learning consumer's — it reaches the projection and the "
+      }
+    ],
+    "theme": "dark"
+  },
+  "alwaysVisible": {
+    "states": [
+      {
+        "state": "top",
+        "misses": 2,
+        "items": {
+          "navbar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "search": {
+            "present": false,
+            "inside": false,
+            "uncovered": false,
+            "ok": false
+          },
+          "themeToggle": {
+            "present": false,
+            "inside": false,
+            "uncovered": false,
+            "ok": false
+          }
+        }
+      },
+      {
+        "state": "after run-locally",
+        "misses": 2,
+        "items": {
+          "navbar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "search": {
+            "present": false,
+            "inside": false,
+            "uncovered": false,
+            "ok": false
+          },
+          "themeToggle": {
+            "present": false,
+            "inside": false,
+            "uncovered": false,
+            "ok": false
+          }
+        }
+      },
+      {
+        "state": "after token-route",
+        "misses": 2,
+        "items": {
+          "navbar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "search": {
+            "present": false,
+            "inside": false,
+            "uncovered": false,
+            "ok": false
+          },
+          "themeToggle": {
+            "present": false,
+            "inside": false,
+            "uncovered": false,
+            "ok": false
+          }
+        }
+      },
+      {
+        "state": "after local-login-refuses",
+        "misses": 2,
+        "items": {
+          "navbar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "search": {
+            "present": false,
+            "inside": false,
+            "uncovered": false,
+            "ok": false
+          },
+          "themeToggle": {
+            "present": false,
+            "inside": false,
+            "uncovered": false,
+            "ok": false
+          }
+        }
+      },
+      {
+        "state": "after invariants",
+        "misses": 2,
+        "items": {
+          "navbar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "search": {
+            "present": false,
+            "inside": false,
+            "uncovered": false,
+            "ok": false
+          },
+          "themeToggle": {
+            "present": false,
+            "inside": false,
+            "uncovered": false,
+            "ok": false
+          }
+        }
+      },
+      {
+        "state": "after source-link",
+        "misses": 2,
+        "items": {
+          "navbar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "search": {
+            "present": false,
+            "inside": false,
+            "uncovered": false,
+            "ok": false
+          },
+          "themeToggle": {
+            "present": false,
+            "inside": false,
+            "uncovered": false,
+            "ok": false
+          }
+        }
+      }
+    ],
+    "misses": 12
+  },
+  "axe": {
+    "serious": [],
+    "seriousNodes": 0,
+    "other": []
+  },
+  "keyboard": {
+    "tabsToTarget": {
+      "run-locally": 18,
+      "token-route": 31,
+      "local-login-refuses": 28,
+      "invariants": 38,
+      "source-link": 10
+    },
+    "presses": 38,
+    "stops": 37,
+    "obscured": 0
+  },
+  "screenOnly": [
+    {
+      "task": "run-locally",
+      "completed": true,
+      "actions": 2,
+      "looks": 3,
+      "glance": 2,
+      "path": [
+        "disclosure: button.clean-btn.tocCollapsibleButton_TO0P \"On this page\"",
+        "link: a.table-of-contents__link \"Running it locally\""
+      ]
+    },
+    {
+      "task": "token-route",
+      "completed": true,
+      "actions": 3,
+      "looks": 4,
+      "glance": 3,
+      "path": [
+        "disclosure: button.clean-btn.tocCollapsibleButton_TO0P \"On this page\"",
+        "link: a.table-of-contents__link \"Routes\"",
+        "PageDown"
+      ]
+    },
+    {
+      "task": "local-login-refuses",
+      "completed": true,
+      "actions": 2,
+      "looks": 3,
+      "glance": 2,
+      "path": [
+        "disclosure: button.clean-btn.tocCollapsibleButton_TO0P \"On this page\"",
+        "link: a.table-of-contents__link \"Signing in on a workstation\""
+      ]
+    },
+    {
+      "task": "invariants",
+      "completed": true,
+      "actions": 18,
+      "looks": 19,
+      "glance": 3,
+      "path": [
+        "disclosure: button.clean-btn.tocCollapsibleButton_TO0P \"On this page\"",
+        "PageDown"
+      ]
+    },
+    {
+      "task": "source-link",
+      "completed": true,
+      "actions": 1,
+      "looks": 2,
+      "glance": 2,
+      "path": [
+        "disclosure: summary \"Source & revision\""
+      ]
+    }
+  ]
+}

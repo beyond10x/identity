@@ -1,0 +1,860 @@
+{
+  "round": "R-01",
+  "date": "2026-11-23",
+  "url": "https://beyond10x.github.io/docs/identity/",
+  "sourceCommit": "e5c4e873323580945aee7dd2b8941180d644db3e",
+  "gatingViewports": [
+    "1280x800",
+    "390x844"
+  ],
+  "metrics": {
+    "page": {
+      "layout.doc_hscroll_px": 0,
+      "layout.past_box": 0,
+      "layout.inner_hscroll": 8,
+      "layout.tables_over_column": 3,
+      "layout.code_hscroll": 5,
+      "layout.long_cells": 2,
+      "always_visible.misses": 2,
+      "axe.serious_nodes": 141,
+      "keyboard.focus_obscured": 0,
+      "source.code_fences_without_language": 0
+    },
+    "tasks": {
+      "run-locally": {
+        "screen_only.actions": 2,
+        "screen_only.looks": 3,
+        "glance_cost.max": 2,
+        "keyboard.tabs": 26
+      },
+      "token-route": {
+        "screen_only.actions": 3,
+        "screen_only.looks": 4,
+        "glance_cost.max": 3,
+        "keyboard.tabs": 39
+      },
+      "local-login-refuses": {
+        "screen_only.actions": 2,
+        "screen_only.looks": 3,
+        "glance_cost.max": 2,
+        "keyboard.tabs": 36
+      },
+      "invariants": {
+        "screen_only.actions": 18,
+        "screen_only.looks": 19,
+        "glance_cost.max": 3,
+        "keyboard.tabs": 43
+      },
+      "source-link": {
+        "screen_only.actions": 1,
+        "screen_only.looks": 2,
+        "glance_cost.max": 2,
+        "keyboard.tabs": 19
+      }
+    }
+  },
+  "projects": [
+    {
+      "project": "1440x900-dark",
+      "viewport": "1440x900",
+      "theme": "dark",
+      "gating": false,
+      "gate1": {
+        "docHScrollPx": 0,
+        "pastBox": 0,
+        "pass": true
+      },
+      "gate2": {
+        "misses": 0,
+        "missed": [],
+        "pass": true
+      },
+      "gate5": {
+        "axeSeriousNodes": 0,
+        "axeRules": [],
+        "keyboardUnreached": 0,
+        "pass": true
+      },
+      "gate4": {
+        "notCompleted": [],
+        "pass": true
+      },
+      "innerHScroll": 3,
+      "tablesOverColumn": 0,
+      "codeHScroll": 3,
+      "codeNoLanguage": 0,
+      "longCells": 2,
+      "tallCells": 0,
+      "axeIncompleteNodes": "n/a",
+      "focusObscured": 0,
+      "screenOnly": [
+        {
+          "task": "run-locally",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        },
+        {
+          "task": "token-route",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        },
+        {
+          "task": "local-login-refuses",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        },
+        {
+          "task": "invariants",
+          "completed": true,
+          "actions": 9,
+          "looks": 10,
+          "glance": 3
+        },
+        {
+          "task": "source-link",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        }
+      ],
+      "keyboardTabs": {
+        "run-locally": 25,
+        "token-route": 38,
+        "local-login-refuses": 35,
+        "invariants": 42,
+        "source-link": 19
+      }
+    },
+    {
+      "project": "1440x900-light",
+      "viewport": "1440x900",
+      "theme": "light",
+      "gating": false,
+      "gate1": {
+        "docHScrollPx": 0,
+        "pastBox": 0,
+        "pass": true
+      },
+      "gate2": {
+        "misses": 0,
+        "missed": [],
+        "pass": true
+      },
+      "gate5": {
+        "axeSeriousNodes": 143,
+        "axeRules": [
+          "color-contrast(143)"
+        ],
+        "keyboardUnreached": 0,
+        "pass": false
+      },
+      "gate4": {
+        "notCompleted": [],
+        "pass": true
+      },
+      "innerHScroll": 3,
+      "tablesOverColumn": 0,
+      "codeHScroll": 3,
+      "codeNoLanguage": 0,
+      "longCells": 2,
+      "tallCells": 0,
+      "axeIncompleteNodes": "n/a",
+      "focusObscured": 0,
+      "screenOnly": [
+        {
+          "task": "run-locally",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        },
+        {
+          "task": "token-route",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        },
+        {
+          "task": "local-login-refuses",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        },
+        {
+          "task": "invariants",
+          "completed": true,
+          "actions": 9,
+          "looks": 10,
+          "glance": 3
+        },
+        {
+          "task": "source-link",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        }
+      ],
+      "keyboardTabs": {
+        "run-locally": 25,
+        "token-route": 38,
+        "local-login-refuses": 35,
+        "invariants": 42,
+        "source-link": 19
+      }
+    },
+    {
+      "project": "1280x800-dark",
+      "viewport": "1280x800",
+      "theme": "dark",
+      "gating": true,
+      "gate1": {
+        "docHScrollPx": 0,
+        "pastBox": 0,
+        "pass": true
+      },
+      "gate2": {
+        "misses": 0,
+        "missed": [],
+        "pass": true
+      },
+      "gate5": {
+        "axeSeriousNodes": 0,
+        "axeRules": [],
+        "keyboardUnreached": 0,
+        "pass": true
+      },
+      "gate4": {
+        "notCompleted": [],
+        "pass": true
+      },
+      "innerHScroll": 4,
+      "tablesOverColumn": 0,
+      "codeHScroll": 4,
+      "codeNoLanguage": 0,
+      "longCells": 2,
+      "tallCells": 0,
+      "axeIncompleteNodes": "n/a",
+      "focusObscured": 0,
+      "screenOnly": [
+        {
+          "task": "run-locally",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        },
+        {
+          "task": "token-route",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        },
+        {
+          "task": "local-login-refuses",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        },
+        {
+          "task": "invariants",
+          "completed": true,
+          "actions": 11,
+          "looks": 12,
+          "glance": 3
+        },
+        {
+          "task": "source-link",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        }
+      ],
+      "keyboardTabs": {
+        "run-locally": 26,
+        "token-route": 39,
+        "local-login-refuses": 36,
+        "invariants": 43,
+        "source-link": 19
+      }
+    },
+    {
+      "project": "1280x800-light",
+      "viewport": "1280x800",
+      "theme": "light",
+      "gating": true,
+      "gate1": {
+        "docHScrollPx": 0,
+        "pastBox": 0,
+        "pass": true
+      },
+      "gate2": {
+        "misses": 0,
+        "missed": [],
+        "pass": true
+      },
+      "gate5": {
+        "axeSeriousNodes": 141,
+        "axeRules": [
+          "color-contrast(141)"
+        ],
+        "keyboardUnreached": 0,
+        "pass": false
+      },
+      "gate4": {
+        "notCompleted": [],
+        "pass": true
+      },
+      "innerHScroll": 4,
+      "tablesOverColumn": 0,
+      "codeHScroll": 4,
+      "codeNoLanguage": 0,
+      "longCells": 2,
+      "tallCells": 0,
+      "axeIncompleteNodes": "n/a",
+      "focusObscured": 0,
+      "screenOnly": [
+        {
+          "task": "run-locally",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        },
+        {
+          "task": "token-route",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        },
+        {
+          "task": "local-login-refuses",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        },
+        {
+          "task": "invariants",
+          "completed": true,
+          "actions": 11,
+          "looks": 12,
+          "glance": 3
+        },
+        {
+          "task": "source-link",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        }
+      ],
+      "keyboardTabs": {
+        "run-locally": 26,
+        "token-route": 39,
+        "local-login-refuses": 36,
+        "invariants": 43,
+        "source-link": 19
+      }
+    },
+    {
+      "project": "1024x768-dark",
+      "viewport": "1024x768",
+      "theme": "dark",
+      "gating": false,
+      "gate1": {
+        "docHScrollPx": 0,
+        "pastBox": 0,
+        "pass": true
+      },
+      "gate2": {
+        "misses": 0,
+        "missed": [],
+        "pass": true
+      },
+      "gate5": {
+        "axeSeriousNodes": 0,
+        "axeRules": [],
+        "keyboardUnreached": 0,
+        "pass": true
+      },
+      "gate4": {
+        "notCompleted": [],
+        "pass": true
+      },
+      "innerHScroll": 4,
+      "tablesOverColumn": 0,
+      "codeHScroll": 4,
+      "codeNoLanguage": 0,
+      "longCells": 2,
+      "tallCells": 0,
+      "axeIncompleteNodes": "n/a",
+      "focusObscured": 0,
+      "screenOnly": [
+        {
+          "task": "run-locally",
+          "completed": true,
+          "actions": 4,
+          "looks": 5,
+          "glance": 3
+        },
+        {
+          "task": "token-route",
+          "completed": true,
+          "actions": 8,
+          "looks": 9,
+          "glance": 3
+        },
+        {
+          "task": "local-login-refuses",
+          "completed": true,
+          "actions": 7,
+          "looks": 8,
+          "glance": 3
+        },
+        {
+          "task": "invariants",
+          "completed": true,
+          "actions": 12,
+          "looks": 13,
+          "glance": 3
+        },
+        {
+          "task": "source-link",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        }
+      ],
+      "keyboardTabs": {
+        "run-locally": 26,
+        "token-route": 39,
+        "local-login-refuses": 36,
+        "invariants": 43,
+        "source-link": 19
+      }
+    },
+    {
+      "project": "1024x768-light",
+      "viewport": "1024x768",
+      "theme": "light",
+      "gating": false,
+      "gate1": {
+        "docHScrollPx": 0,
+        "pastBox": 0,
+        "pass": true
+      },
+      "gate2": {
+        "misses": 0,
+        "missed": [],
+        "pass": true
+      },
+      "gate5": {
+        "axeSeriousNodes": 141,
+        "axeRules": [
+          "color-contrast(141)"
+        ],
+        "keyboardUnreached": 0,
+        "pass": false
+      },
+      "gate4": {
+        "notCompleted": [],
+        "pass": true
+      },
+      "innerHScroll": 4,
+      "tablesOverColumn": 0,
+      "codeHScroll": 4,
+      "codeNoLanguage": 0,
+      "longCells": 2,
+      "tallCells": 0,
+      "axeIncompleteNodes": "n/a",
+      "focusObscured": 0,
+      "screenOnly": [
+        {
+          "task": "run-locally",
+          "completed": true,
+          "actions": 4,
+          "looks": 5,
+          "glance": 3
+        },
+        {
+          "task": "token-route",
+          "completed": true,
+          "actions": 8,
+          "looks": 9,
+          "glance": 3
+        },
+        {
+          "task": "local-login-refuses",
+          "completed": true,
+          "actions": 7,
+          "looks": 8,
+          "glance": 3
+        },
+        {
+          "task": "invariants",
+          "completed": true,
+          "actions": 12,
+          "looks": 13,
+          "glance": 3
+        },
+        {
+          "task": "source-link",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        }
+      ],
+      "keyboardTabs": {
+        "run-locally": 26,
+        "token-route": 39,
+        "local-login-refuses": 36,
+        "invariants": 43,
+        "source-link": 19
+      }
+    },
+    {
+      "project": "768x1024-dark",
+      "viewport": "768x1024",
+      "theme": "dark",
+      "gating": false,
+      "gate1": {
+        "docHScrollPx": 0,
+        "pastBox": 0,
+        "pass": true
+      },
+      "gate2": {
+        "misses": 2,
+        "missed": [
+          "search hidden",
+          "themeToggle hidden"
+        ],
+        "pass": false
+      },
+      "gate5": {
+        "axeSeriousNodes": 0,
+        "axeRules": [],
+        "keyboardUnreached": 0,
+        "pass": true
+      },
+      "gate4": {
+        "notCompleted": [],
+        "pass": true
+      },
+      "innerHScroll": 4,
+      "tablesOverColumn": 0,
+      "codeHScroll": 4,
+      "codeNoLanguage": 0,
+      "longCells": 2,
+      "tallCells": 0,
+      "axeIncompleteNodes": "n/a",
+      "focusObscured": 0,
+      "screenOnly": [
+        {
+          "task": "run-locally",
+          "completed": true,
+          "actions": 2,
+          "looks": 3,
+          "glance": 2
+        },
+        {
+          "task": "token-route",
+          "completed": true,
+          "actions": 2,
+          "looks": 3,
+          "glance": 2
+        },
+        {
+          "task": "local-login-refuses",
+          "completed": true,
+          "actions": 2,
+          "looks": 3,
+          "glance": 2
+        },
+        {
+          "task": "invariants",
+          "completed": true,
+          "actions": 10,
+          "looks": 11,
+          "glance": 3
+        },
+        {
+          "task": "source-link",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        }
+      ],
+      "keyboardTabs": {
+        "run-locally": 17,
+        "token-route": 30,
+        "local-login-refuses": 27,
+        "invariants": 34,
+        "source-link": 10
+      }
+    },
+    {
+      "project": "768x1024-light",
+      "viewport": "768x1024",
+      "theme": "light",
+      "gating": false,
+      "gate1": {
+        "docHScrollPx": 0,
+        "pastBox": 0,
+        "pass": true
+      },
+      "gate2": {
+        "misses": 2,
+        "missed": [
+          "search hidden",
+          "themeToggle hidden"
+        ],
+        "pass": false
+      },
+      "gate5": {
+        "axeSeriousNodes": 143,
+        "axeRules": [
+          "color-contrast(143)"
+        ],
+        "keyboardUnreached": 0,
+        "pass": false
+      },
+      "gate4": {
+        "notCompleted": [],
+        "pass": true
+      },
+      "innerHScroll": 4,
+      "tablesOverColumn": 0,
+      "codeHScroll": 4,
+      "codeNoLanguage": 0,
+      "longCells": 2,
+      "tallCells": 0,
+      "axeIncompleteNodes": "n/a",
+      "focusObscured": 0,
+      "screenOnly": [
+        {
+          "task": "run-locally",
+          "completed": true,
+          "actions": 2,
+          "looks": 3,
+          "glance": 2
+        },
+        {
+          "task": "token-route",
+          "completed": true,
+          "actions": 2,
+          "looks": 3,
+          "glance": 2
+        },
+        {
+          "task": "local-login-refuses",
+          "completed": true,
+          "actions": 2,
+          "looks": 3,
+          "glance": 2
+        },
+        {
+          "task": "invariants",
+          "completed": true,
+          "actions": 10,
+          "looks": 11,
+          "glance": 3
+        },
+        {
+          "task": "source-link",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        }
+      ],
+      "keyboardTabs": {
+        "run-locally": 17,
+        "token-route": 30,
+        "local-login-refuses": 27,
+        "invariants": 34,
+        "source-link": 10
+      }
+    },
+    {
+      "project": "390x844-dark",
+      "viewport": "390x844",
+      "theme": "dark",
+      "gating": true,
+      "gate1": {
+        "docHScrollPx": 0,
+        "pastBox": 0,
+        "pass": true
+      },
+      "gate2": {
+        "misses": 2,
+        "missed": [
+          "search hidden",
+          "themeToggle hidden"
+        ],
+        "pass": false
+      },
+      "gate5": {
+        "axeSeriousNodes": 0,
+        "axeRules": [],
+        "keyboardUnreached": 0,
+        "pass": true
+      },
+      "gate4": {
+        "notCompleted": [],
+        "pass": true
+      },
+      "innerHScroll": 8,
+      "tablesOverColumn": 3,
+      "codeHScroll": 5,
+      "codeNoLanguage": 0,
+      "longCells": 2,
+      "tallCells": 12,
+      "axeIncompleteNodes": "n/a",
+      "focusObscured": 0,
+      "screenOnly": [
+        {
+          "task": "run-locally",
+          "completed": true,
+          "actions": 2,
+          "looks": 3,
+          "glance": 2
+        },
+        {
+          "task": "token-route",
+          "completed": true,
+          "actions": 3,
+          "looks": 4,
+          "glance": 3
+        },
+        {
+          "task": "local-login-refuses",
+          "completed": true,
+          "actions": 2,
+          "looks": 3,
+          "glance": 2
+        },
+        {
+          "task": "invariants",
+          "completed": true,
+          "actions": 18,
+          "looks": 19,
+          "glance": 3
+        },
+        {
+          "task": "source-link",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        }
+      ],
+      "keyboardTabs": {
+        "run-locally": 18,
+        "token-route": 31,
+        "local-login-refuses": 28,
+        "invariants": 38,
+        "source-link": 10
+      }
+    },
+    {
+      "project": "390x844-light",
+      "viewport": "390x844",
+      "theme": "light",
+      "gating": true,
+      "gate1": {
+        "docHScrollPx": 0,
+        "pastBox": 0,
+        "pass": true
+      },
+      "gate2": {
+        "misses": 2,
+        "missed": [
+          "search hidden",
+          "themeToggle hidden"
+        ],
+        "pass": false
+      },
+      "gate5": {
+        "axeSeriousNodes": 136,
+        "axeRules": [
+          "color-contrast(136)"
+        ],
+        "keyboardUnreached": 0,
+        "pass": false
+      },
+      "gate4": {
+        "notCompleted": [],
+        "pass": true
+      },
+      "innerHScroll": 8,
+      "tablesOverColumn": 3,
+      "codeHScroll": 5,
+      "codeNoLanguage": 0,
+      "longCells": 2,
+      "tallCells": 12,
+      "axeIncompleteNodes": "n/a",
+      "focusObscured": 0,
+      "screenOnly": [
+        {
+          "task": "run-locally",
+          "completed": true,
+          "actions": 2,
+          "looks": 3,
+          "glance": 2
+        },
+        {
+          "task": "token-route",
+          "completed": true,
+          "actions": 3,
+          "looks": 4,
+          "glance": 3
+        },
+        {
+          "task": "local-login-refuses",
+          "completed": true,
+          "actions": 2,
+          "looks": 3,
+          "glance": 2
+        },
+        {
+          "task": "invariants",
+          "completed": true,
+          "actions": 18,
+          "looks": 19,
+          "glance": 3
+        },
+        {
+          "task": "source-link",
+          "completed": true,
+          "actions": 1,
+          "looks": 2,
+          "glance": 2
+        }
+      ],
+      "keyboardTabs": {
+        "run-locally": 18,
+        "token-route": 31,
+        "local-login-refuses": 28,
+        "invariants": 38,
+        "source-link": 10
+      }
+    }
+  ]
+}

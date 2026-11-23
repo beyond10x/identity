@@ -1,0 +1,395 @@
+{
+  "project": "1024x768-dark",
+  "viewport": "1024x768",
+  "theme": "dark",
+  "gating": false,
+  "url": "https://beyond10x.github.io/docs/identity/",
+  "resolved": [
+    {
+      "id": "run-locally",
+      "found": true,
+      "heading": "running-it-locally",
+      "desc": "div.language-bash.codeBlockContainer_Ckt0.theme-code-block \"IDENTITY_LISTEN=127.0.0.1:8080 \\IDENTITY_PUBLIC_OR\""
+    },
+    {
+      "id": "token-route",
+      "found": true,
+      "heading": "routes",
+      "desc": "td \"GET /oauth/authorize, GET /oauth/callback/upstream\""
+    },
+    {
+      "id": "local-login-refuses",
+      "found": true,
+      "heading": "signing-in-on-a-workstation",
+      "desc": "p \"Issuing a session for a mailbox somebody typed aut\""
+    },
+    {
+      "id": "invariants",
+      "found": true,
+      "heading": "the-rules-that-shape-the-code",
+      "desc": "h2#the-rules-that-shape-the-code.anchor.anchorTargetStickyNavbar_Vzrq \"The rules that shape the code\""
+    },
+    {
+      "id": "source-link",
+      "found": true,
+      "heading": null,
+      "desc": "a \"identity/README.md\""
+    }
+  ],
+  "layout": {
+    "viewportWidth": 1024,
+    "column": 692,
+    "docHScrollPx": 0,
+    "pageOverflow": [],
+    "clipped": [],
+    "innerScrollers": [
+      {
+        "container": "pre.prism-code.language-bash.codeBlock_bY9V \"IDENTITY_TEST_POSTGRES_URL='postgresql://user:pass\"",
+        "overflowPx": 129
+      },
+      {
+        "container": "pre.prism-code.language-bash.codeBlock_bY9V \"IDENTITY_LISTEN=127.0.0.1:8080 \\IDENTITY_PUBLIC_OR\"",
+        "overflowPx": 1455
+      },
+      {
+        "container": "pre.prism-code.language-bash.codeBlock_bY9V \"IDENTITY_UPSTREAM_PROVIDERS_JSON='[{\"id\":\"one\",\"la\"",
+        "overflowPx": 1892
+      },
+      {
+        "container": "pre.prism-code.language-bash.codeBlock_bY9V \"IDENTITY_TRUSTED_ACCESS_CALLERS_JSON='[{\"id\":\"rely\"",
+        "overflowPx": 1472
+      }
+    ],
+    "tables": [
+      {
+        "first": "areastate",
+        "width": 692,
+        "column": 692,
+        "overColumn": false
+      },
+      {
+        "first": "stepcommand",
+        "width": 692,
+        "column": 692,
+        "overColumn": false
+      },
+      {
+        "first": "routefor",
+        "width": 692,
+        "column": 692,
+        "overColumn": false
+      },
+      {
+        "first": "audiencereached by",
+        "width": 692,
+        "column": 692,
+        "overColumn": false
+      },
+      {
+        "first": "pathholds",
+        "width": 692,
+        "column": 692,
+        "overColumn": false
+      }
+    ],
+    "codeBlocks": [
+      {
+        "lang": "language-bash",
+        "hScrollPx": 129,
+        "widthRatio": 1.19
+      },
+      {
+        "lang": "language-bash",
+        "hScrollPx": 1455,
+        "widthRatio": 3.11
+      },
+      {
+        "lang": "language-bash",
+        "hScrollPx": 1892,
+        "widthRatio": 3.74
+      },
+      {
+        "lang": "language-bash",
+        "hScrollPx": 1472,
+        "widthRatio": 3.13
+      },
+      {
+        "lang": "language-bash",
+        "hScrollPx": 0,
+        "widthRatio": 1
+      },
+      {
+        "lang": "language-json",
+        "hScrollPx": 0,
+        "widthRatio": 1
+      }
+    ],
+    "longCells": [
+      {
+        "chars": 198,
+        "height": 136,
+        "text": "an authenticated session via POST /v1/access-token, or a pub"
+      },
+      {
+        "chars": 192,
+        "height": 108,
+        "text": "the learning consumer's — it reaches the projection and the "
+      }
+    ],
+    "theme": "dark"
+  },
+  "alwaysVisible": {
+    "states": [
+      {
+        "state": "top",
+        "misses": 0,
+        "items": {
+          "navbar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "search": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "themeToggle": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "sidebar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          }
+        }
+      },
+      {
+        "state": "after run-locally",
+        "misses": 0,
+        "items": {
+          "navbar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "search": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "themeToggle": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "sidebar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          }
+        }
+      },
+      {
+        "state": "after token-route",
+        "misses": 0,
+        "items": {
+          "navbar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "search": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "themeToggle": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "sidebar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          }
+        }
+      },
+      {
+        "state": "after local-login-refuses",
+        "misses": 0,
+        "items": {
+          "navbar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "search": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "themeToggle": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "sidebar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          }
+        }
+      },
+      {
+        "state": "after invariants",
+        "misses": 0,
+        "items": {
+          "navbar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "search": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "themeToggle": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "sidebar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          }
+        }
+      },
+      {
+        "state": "after source-link",
+        "misses": 0,
+        "items": {
+          "navbar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "search": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "themeToggle": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          },
+          "sidebar": {
+            "present": true,
+            "inside": true,
+            "uncovered": true,
+            "ok": true
+          }
+        }
+      }
+    ],
+    "misses": 0
+  },
+  "axe": {
+    "serious": [],
+    "seriousNodes": 0,
+    "other": []
+  },
+  "keyboard": {
+    "tabsToTarget": {
+      "run-locally": 26,
+      "token-route": 39,
+      "local-login-refuses": 36,
+      "invariants": 43,
+      "source-link": 19
+    },
+    "presses": 43,
+    "stops": 42,
+    "obscured": 0
+  },
+  "screenOnly": [
+    {
+      "task": "run-locally",
+      "completed": true,
+      "actions": 4,
+      "looks": 5,
+      "glance": 3,
+      "path": [
+        "PageDown"
+      ]
+    },
+    {
+      "task": "token-route",
+      "completed": true,
+      "actions": 8,
+      "looks": 9,
+      "glance": 3,
+      "path": [
+        "PageDown"
+      ]
+    },
+    {
+      "task": "local-login-refuses",
+      "completed": true,
+      "actions": 7,
+      "looks": 8,
+      "glance": 3,
+      "path": [
+        "PageDown"
+      ]
+    },
+    {
+      "task": "invariants",
+      "completed": true,
+      "actions": 12,
+      "looks": 13,
+      "glance": 3,
+      "path": [
+        "PageDown"
+      ]
+    },
+    {
+      "task": "source-link",
+      "completed": true,
+      "actions": 1,
+      "looks": 2,
+      "glance": 2,
+      "path": [
+        "disclosure: summary \"Source & revision\""
+      ]
+    }
+  ]
+}
