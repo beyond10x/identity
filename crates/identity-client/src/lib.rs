@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::time::Duration;
 
@@ -405,7 +406,7 @@ impl IdentityClient {
             || response.expires_in <= 0
             || response.access_token.is_empty()
             || response.audience != audience
-            || response.scope != scope
+            || !same_scope_set(scope, &response.scope)
         {
             return Err(ClientError::UnexpectedStatus(502));
         }
@@ -460,7 +461,7 @@ impl IdentityClient {
             || response.expires_in <= 0
             || response.access_token.is_empty()
             || response.audience != audience
-            || response.scope != scope
+            || !same_scope_set(scope, &response.scope)
         {
             return Err(ClientError::UnexpectedStatus(502));
         }
@@ -551,6 +552,23 @@ impl IdentityClient {
             .join(path)
             .map_err(|_| ClientError::Configuration("Identity endpoint path is invalid"))
     }
+}
+
+/// Parses a scope string the way the Identity server accepts it: names separated by single
+/// spaces, no repeats. Returns `None` for anything the server would refuse as non-canonical.
+fn scope_set(value: &str) -> Option<BTreeSet<&str>> {
+    let names = value.split_ascii_whitespace().collect::<Vec<_>>();
+    if names.is_empty() || names.join(" ") != value {
+        return None;
+    }
+    let set = names.iter().copied().collect::<BTreeSet<_>>();
+    (set.len() == names.len()).then_some(set)
+}
+
+/// The server grants the requested set in lexical order, so only the set is compared; a missing,
+/// extra or repeated scope on either side still fails.
+fn same_scope_set(requested: &str, granted: &str) -> bool {
+    matches!((scope_set(requested), scope_set(granted)), (Some(r), Some(g)) if r == g)
 }
 
 fn require_confidential(response: &reqwest::Response) -> Result<(), ClientError> {
@@ -852,6 +870,142 @@ mod tests {
             exchange.credential.expose_at_cookie_boundary(),
             "identity_session_v1_synthetic"
         );
+    }
+
+    fn granted_scope_response(scope: &'static str) -> Response {
+        let mut response = axum::Json(json!({
+            "access_token":"synthetic-scoped-access",
+            "token_type":"Bearer",
+            "expires_in":300,
+            "audience":"urn:example:resource-api",
+            "scope":scope
+        }))
+        .into_response();
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response
+            .headers_mut()
+            .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+        response
+    }
+
+    async fn granting_origin(granted: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route(
+                        "/v1/access-token",
+                        post(move || async move { granted_scope_response(granted) }),
+                    )
+                    .route(
+                        "/v1/access-exchange",
+                        post(move || async move { granted_scope_response(granted) }),
+                    ),
+            )
+            .await
+            .unwrap();
+        });
+        format!("http://127.0.0.1:{}/", address.port())
+    }
+
+    async fn issue_with_grant(
+        requested: &str,
+        granted: &'static str,
+    ) -> Result<AccessToken, ClientError> {
+        IdentityClient::new(&granting_origin(granted).await, "urn:example:console")
+            .unwrap()
+            .issue_access_token(
+                "Bearer synthetic-session",
+                "urn:example:resource-api",
+                requested,
+            )
+            .await
+    }
+
+    async fn exchange_with_grant(
+        requested: &str,
+        granted: &'static str,
+    ) -> Result<AccessToken, ClientError> {
+        IdentityClient::new(&granting_origin(granted).await, "urn:example:console")
+            .unwrap()
+            .exchange_access_token(
+                "Bearer synthetic-source-access",
+                "service-a",
+                "synthetic-secret-with-thirty-two-bytes",
+                "urn:example:published",
+                "urn:example:resource-api",
+                requested,
+            )
+            .await
+    }
+
+    const SORTED_GRANT: &str = "resource.read resource.write";
+    const UNSORTED_REQUEST: &str = "resource.write resource.read";
+    const WRONG_GRANTS: [&str; 5] = [
+        "resource.admin resource.read resource.write",
+        "resource.read",
+        "resource.write",
+        "resource.read resource.read resource.write",
+        "resource.read  resource.write",
+    ];
+
+    #[tokio::test]
+    async fn issuance_accepts_the_granted_set_in_server_order() {
+        let access = issue_with_grant(UNSORTED_REQUEST, SORTED_GRANT)
+            .await
+            .unwrap();
+        assert_eq!(access.scope, SORTED_GRANT);
+    }
+
+    #[tokio::test]
+    async fn exchange_accepts_the_granted_set_in_server_order() {
+        let access = exchange_with_grant(UNSORTED_REQUEST, SORTED_GRANT)
+            .await
+            .unwrap();
+        assert_eq!(access.scope, SORTED_GRANT);
+    }
+
+    #[tokio::test]
+    async fn issuance_refuses_a_grant_with_an_extra_or_missing_scope() {
+        for granted in WRONG_GRANTS {
+            assert!(
+                matches!(
+                    issue_with_grant(UNSORTED_REQUEST, granted).await,
+                    Err(ClientError::UnexpectedStatus(502))
+                ),
+                "granted {granted:?} must be refused"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exchange_refuses_a_grant_with_an_extra_or_missing_scope() {
+        for granted in WRONG_GRANTS {
+            assert!(
+                matches!(
+                    exchange_with_grant(UNSORTED_REQUEST, granted).await,
+                    Err(ClientError::UnexpectedStatus(502))
+                ),
+                "granted {granted:?} must be refused"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_that_repeats_a_scope_is_refused_like_the_server_does() {
+        let requested = "resource.write resource.read resource.write";
+        assert!(matches!(
+            issue_with_grant(requested, SORTED_GRANT).await,
+            Err(ClientError::UnexpectedStatus(502))
+        ));
+        assert!(matches!(
+            exchange_with_grant(requested, SORTED_GRANT).await,
+            Err(ClientError::UnexpectedStatus(502))
+        ));
     }
 
     #[test]
