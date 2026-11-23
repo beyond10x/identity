@@ -160,6 +160,8 @@ pub struct AccessToken {
     pub credential: AccessCredential,
     pub expires_in: i64,
     pub audience: String,
+    /// The scope string the Identity server granted, in its lexical order. It is the same set the
+    /// caller requested, but not necessarily the caller's string.
     pub scope: String,
 }
 
@@ -945,12 +947,17 @@ mod tests {
 
     const SORTED_GRANT: &str = "resource.read resource.write";
     const UNSORTED_REQUEST: &str = "resource.write resource.read";
-    const WRONG_GRANTS: [&str; 5] = [
+    const WRONG_GRANTS: [&str; 10] = [
         "resource.admin resource.read resource.write",
         "resource.read",
         "resource.write",
         "resource.read resource.read resource.write",
         "resource.read  resource.write",
+        "",
+        "Resource.read resource.write",
+        "resource.read\tresource.write",
+        " resource.read resource.write",
+        "resource.read resource.write ",
     ];
 
     #[tokio::test]
