@@ -23,9 +23,20 @@ types:
         "identity_profile_statement_v1_" + 22 base64url characters, 52 in all
         (STATEMENT_ID_PREFIX src/profile.rs:75, STATEMENT_ID_TOKEN_CHARACTERS src/profile.rs:77,
         new_statement_id src/profile.rs:1360-1365, validated_statement_id src/profile.rs:403-418).
+        A path id outside the type is refused 400 "malformed profile statement id"
+        (src/profile.rs:416) after the session check and before the lookup; the type carries
+        its prefix and alphabet, so no command declares that refusal.
     kind: newtype
     of: String
     prefix: "identity_profile_statement_v1_"
+    # The prefix's characters lie inside the token's base64url alphabet (valid_b64_token
+    # src/profile.rs:406-412).
+    alphabet: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    # UNMAPPED: the length, exactly 52 (src/profile.rs:77, 406-412). `invariants: [value.count ==
+    # 52]` validates, but the interpreted target then cannot mint a value of the type ("its type
+    # has no shape the interpreter can mint"), leaving 40 of 123 scenarios unsupported; a guard
+    # `statement_id.count != 52` on each command refused the minted ids instead (25 failures).
+    # What would settle it: a minted shape that honours a length invariant.
 
   - name: identity.profile.ProfileSubject
     naming:
@@ -263,17 +274,6 @@ events:
     fields:
       - {name: statement_id, type: identity.profile.StatementId}
 
-outcome_groups:
-  - name: profile-session
-    domain: identity.profile
-    outcomes:
-      - name: profile-session-refused
-        external: >-
-          x-b10x-audience is not one the route admits, or the bearer is no live Identity session
-          (admitted_session_for_audiences src/lib.rs:2548-2567); the code checks this before the
-          request's own fields (src/profile.rs:1211, 1253, 1424, 1446, 1464, 1548)
-        error: identity.errors.AccessDenied
-
 commands:
   - name: identity.profile.PutConsent
     # PUT /v1/profile/consent (src/lib.rs:2511), put_consent src/profile.rs:1206-1246;
@@ -298,6 +298,14 @@ commands:
     # src/profile.rs:83, src/profile.rs:1213-1232); the count selects by the session's tenant.
     # UNMAPPED: a PUT for a person who already has a consent row updates it (see the entity).
     outcomes:
+      - name: profile-session-refused
+        before_row: true
+        external: >-
+          x-b10x-audience is not one the route admits, or the bearer is no live Identity
+          session (admitted_session_for_audiences src/lib.rs:2548-2567); checked first,
+          before any field of the request (src/profile.rs:1211)
+        error: identity.errors.AccessDenied
+
       - name: too-many-exclusions
         when: excluded_sources.count > 64
         error: identity.errors.InvalidRequest
@@ -368,6 +376,14 @@ commands:
     # UNMAPPED: source_reference is "<kind>:<id>" (src/profile.rs:374), which ESS cannot build;
     # it is left generated.
     outcomes:
+      - name: profile-session-refused
+        before_row: true
+        external: >-
+          x-b10x-audience is not one the route admits, or the bearer is no live Identity
+          session (admitted_session_for_audiences src/lib.rs:2548-2567); checked first,
+          before any field of the request (src/profile.rs:1253)
+        error: identity.errors.AccessDenied
+
       - name: horizon-missing
         when: {all: [kind == goal_horizon, not defined(horizon)]}
         error: identity.errors.InvalidRequest
@@ -452,13 +468,14 @@ commands:
       - {name: statement_id, type: identity.profile.StatementId}
     # UNMAPPED: confirmed_at keeps an earlier value and is now otherwise
     # (`record.confirmed_at.unwrap_or(now)` src/profile.rs:1434); ESS declares one or the other.
-    # UNMAPPED: the id's 22 characters must be base64url (valid_b64_token src/profile.rs:406-412);
-    # only the length is declared.
     outcomes:
-      - name: malformed-id
-        when: statement_id.count != 52
-        error: identity.errors.InvalidRequest
-        summary: '"malformed profile statement id" (validated_statement_id src/profile.rs:403-418, 1425).'
+      - name: profile-session-refused
+        before_row: true
+        external: >-
+          x-b10x-audience is not one the route admits, or the bearer is no live Identity
+          session (admitted_session_for_audiences src/lib.rs:2548-2567); checked first,
+          before any field of the request (src/profile.rs:1424)
+        error: identity.errors.AccessDenied
 
       - name: not-found
         unknown_instance: true
@@ -497,10 +514,13 @@ commands:
       - {name: statement_id, type: identity.profile.StatementId}
       - {name: epistemic_state, type: String}
     outcomes:
-      - name: malformed-id
-        when: statement_id.count != 52
-        error: identity.errors.InvalidRequest
-        summary: 'src/profile.rs:1447.'
+      - name: profile-session-refused
+        before_row: true
+        external: >-
+          x-b10x-audience is not one the route admits, or the bearer is no live Identity
+          session (admitted_session_for_audiences src/lib.rs:2548-2567); checked first,
+          before any field of the request (src/profile.rs:1446)
+        error: identity.errors.AccessDenied
 
       - name: bad-state
         when:
@@ -566,10 +586,13 @@ commands:
     # replacement is erased again and the answer is 409 or 404 (link_correction
     # src/profile.rs:1505-1530).
     outcomes:
-      - name: malformed-id
-        when: statement_id.count != 52
-        error: identity.errors.InvalidRequest
-        summary: 'src/profile.rs:1465.'
+      - name: profile-session-refused
+        before_row: true
+        external: >-
+          x-b10x-audience is not one the route admits, or the bearer is no live Identity
+          session (admitted_session_for_audiences src/lib.rs:2548-2567); checked first,
+          before any field of the request (src/profile.rs:1464)
+        error: identity.errors.AccessDenied
 
       - name: not-found
         unknown_instance: true
@@ -612,10 +635,13 @@ commands:
     input:
       - {name: statement_id, type: identity.profile.StatementId}
     outcomes:
-      - name: malformed-id
-        when: statement_id.count != 52
-        error: identity.errors.InvalidRequest
-        summary: 'src/profile.rs:1549.'
+      - name: profile-session-refused
+        before_row: true
+        external: >-
+          x-b10x-audience is not one the route admits, or the bearer is no live Identity
+          session (admitted_session_for_audiences src/lib.rs:2548-2567); checked first,
+          before any field of the request (src/profile.rs:1548)
+        error: identity.errors.AccessDenied
 
       - name: not-found
         unknown_instance: true

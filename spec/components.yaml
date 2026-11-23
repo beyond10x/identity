@@ -18,7 +18,6 @@ components:
     accepts:
       commands:
         - identity.login.Authorize
-        - identity.login.SignInLocally
         - identity.login.CompleteUpstreamLogin
         - identity.login.StartIdentityLink
         - identity.credentials.ExchangeAuthorizationCode

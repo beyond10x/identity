@@ -36,11 +36,11 @@ types:
 entities:
   - name: identity.login.LoginTransaction
     # read from: table login_transactions src/lib.rs:1093-1106 and the added columns
-    # src/lib.rs:1162-1172; struct LoginTransaction src/lib.rs:2150-2165.
+    # src/lib.rs:1163-1177; struct LoginTransaction src/lib.rs:2150-2165.
     naming:
       summary: >-
         The state Identity holds while a browser is at the upstream provider, keyed by the
-        random upstream `state` (src/lib.rs:3020, 3042). A link login (src/lib.rs:2884-2961)
+        random upstream `state` (src/lib.rs:3001, 3036). A link login (src/lib.rs:2884-2961)
         carries link_subject and link_tenant_id and empty client fields.
     identity:
       name: upstream_state
@@ -48,27 +48,27 @@ entities:
     fields:
       - name: provider_id            # src/lib.rs:1095, 2152
         type: String
-      - name: created_at             # unix seconds, src/lib.rs:1096, 3039
+      - name: created_at             # unix seconds, src/lib.rs:1096, 3038
         type: Integer
-      - name: client_id              # src/lib.rs:1097; "" for a link login src/lib.rs:2948
+      - name: client_id              # src/lib.rs:1097; "" for a link login src/lib.rs:2945
         type: String
-      - name: redirect_uri           # src/lib.rs:1098; "" for a link login src/lib.rs:2949
+      - name: redirect_uri           # src/lib.rs:1098; "" for a link login src/lib.rs:2946
         type: String
       - name: client_state           # src/lib.rs:1099
         type: String
-      - name: client_nonce           # src/lib.rs:1100; "" when the request had none src/lib.rs:3043
+      - name: client_nonce           # src/lib.rs:1100; "" when the request had none src/lib.rs:3042
         type: String
       - name: client_code_challenge  # the client's S256 PKCE challenge, a verifier, src/lib.rs:1101
         type: String
-      - name: requested_audience     # the RFC 8707 resource, src/lib.rs:1102, 3045
+      - name: requested_audience     # the RFC 8707 resource, src/lib.rs:1102, 3044
         type: Optional<String>
-      - name: requested_scope        # src/lib.rs:1103, 3046; None for a link login src/lib.rs:2954
+      - name: requested_scope        # src/lib.rs:1103, 3045; None for a link login src/lib.rs:2951
         type: Optional<String>
       - name: upstream_nonce         # src/lib.rs:1104
         type: String
-      - name: link_subject           # src/lib.rs:1164, 2958
+      - name: link_subject           # src/lib.rs:1169, 2954
         type: Optional<String>
-      - name: link_tenant_id         # src/lib.rs:1165, 2959
+      - name: link_tenant_id         # src/lib.rs:1170, 2955
         type: Optional<String>
       # Not declared: upstream_pkce_verifier (src/lib.rs:1105, 2162). It is Identity's own PKCE
       # verifier toward the upstream provider, stored as the value, and the brief forbids modelling
@@ -77,13 +77,13 @@ entities:
     lifecycle:
       # Structural, not read from the code: the row has no status column. It is inserted by
       # put_login (src/lib.rs:1224) and removed by take_login's DELETE ... RETURNING
-      # (src/lib.rs:1291-1300) or by expiry collection (src/lib.rs:1985-1988).
+      # (src/lib.rs:1291-1300) or by expiry collection (src/lib.rs:1990-1993).
       initial: Pending
       states: [Pending]
       terminal: [Pending]
 
   - name: identity.login.AuthorizationCode
-    # read from: table authorization_codes src/lib.rs:1120-1131 and src/lib.rs:1173-1190;
+    # read from: table authorization_codes src/lib.rs:1120-1131 and src/lib.rs:1178-1194;
     # struct PendingAuthorization src/lib.rs:2168-2178; put_code src/lib.rs:1543-1598.
     naming:
       summary: >-
@@ -115,7 +115,7 @@ entities:
         type: Optional<String>
     lifecycle:
       # Structural: no status column. Removed by take_code's DELETE ... RETURNING
-      # (src/lib.rs:1600-1611) or by expiry collection (src/lib.rs:1989-1992).
+      # (src/lib.rs:1600-1611) or by expiry collection (src/lib.rs:1994-1997).
       initial: Issued
       states: [Issued]
       terminal: [Issued]
@@ -148,7 +148,7 @@ entities:
     # across rows; an entity invariant reads one row. What would settle it: a uniqueness
     # construct in ESS, or a refusal on every creator (the creators here leave the key generated).
     lifecycle:
-      # Structural: no status column. Removed by RemoveIdentityLink (src/lib.rs:1520-1525).
+      # Structural: no status column. Removed by RemoveIdentityLink (src/lib.rs:1519-1527).
       initial: Linked
       states: [Linked]
       terminal: [Linked]
@@ -161,15 +161,14 @@ actors:
       display: Browser
     may:
       - identity.login.Authorize
-      - identity.login.SignInLocally
       - identity.login.CompleteUpstreamLogin
 
   - name: identity.login.SessionAudienceApplication
     # An in-cluster application presenting the person's own Identity session with a registered
     # session audience in x-b10x-audience (src/lib.rs:2537-2577, 2861-2869; README.md "Audiences").
     # The attributes are what the presented session resolves to (resolve_session RETURNING
-    # tenant_id, subject, email src/lib.rs:1738) and the verifier of the presented bearer
-    # (hash(credential) src/lib.rs:1721). Decision D2.
+    # tenant_id, subject, email src/lib.rs:1736) and the verifier of the presented bearer
+    # (hash(credential) src/lib.rs:1720). Decision D2.
     naming:
       display: Session-audience application
     attributes:
@@ -225,7 +224,7 @@ commands:
       - {name: resource, type: Optional<String>}
     # UNMAPPED: the scope must be canonical (single spaces, no repeats, each name 1-128 of
     # [A-Za-z0-9.:/_-], at most 1024 bytes; canonical_requested_scopes src/lib.rs:3559-3577) and,
-    # without a resource, contain the token `openid` (src/lib.rs:3456-3458). ESS has no guard that
+    # without a resource, contain the token `openid` (src/lib.rs:3454-3456). ESS has no guard that
     # splits a string into tokens. What would settle it: a list-typed scope input, or a token
     # predicate in ESS.
     # UNMAPPED: state, nonce and code_challenge must also be base64url characters
@@ -234,34 +233,67 @@ commands:
     # UNMAPPED: with more than one configured provider and no identity_provider the route answers
     # an HTML chooser and stores nothing (src/lib.rs:2988-2990, 3056-3103). The provider count is
     # deployment configuration, so no input guard selects it.
-    # Not declared here: a `local-login` build answers this route itself; see SignInLocally.
+    # Not declared here: a `local-login` build answers this route itself; see the UNMAPPED note
+    # above CompleteUpstreamLogin.
     outcomes:
+      # Order of validate_authorization_request (src/lib.rs:3431-3474), then the provider
+      # (src/lib.rs:2996), then the insert cap (put_login src/lib.rs:3033-3052). The client,
+      # resource and provider refusals read configuration only, so they are `before_row:` and
+      # answer in that order among the input guards.
       - name: bad-response-type
         when: response_type != "code"
         error: identity.errors.InvalidRequest
         summary: '"response_type must be code" (src/lib.rs:3435-3437).'
 
+      - name: cli-redirect-refused
+        before_row: true
+        external: >-
+          client_id is the configured CLI client and redirect_uri is not the exact http loopback
+          /callback URI with an ephemeral port (src/lib.rs:3438-3439, 3496-3513)
+        error: identity.errors.InvalidRequest
+
+      - name: unknown-client
+        before_row: true
+        external: >-
+          client_id and redirect_uri are not one registered web client's exact pair
+          (IDENTITY_WEB_CLIENTS_JSON, src/lib.rs:3440-3447)
+        error: identity.errors.AccessDenied
+
+      - name: resource-not-admitted
+        before_row: true
+        external: >-
+          the resource names no access audience of the deployment's audience registry
+          (src/lib.rs:3450-3453)
+        error: identity.errors.AccessDenied
+
       - name: bad-challenge-method
         when: code_challenge_method != "S256"
         error: identity.errors.InvalidRequest
-        summary: '"a valid S256 PKCE challenge is required" (src/lib.rs:3460-3464).'
+        summary: '"a valid S256 PKCE challenge is required" (src/lib.rs:3457-3461).'
 
       - name: bad-challenge
         when: code_challenge.count != 43
         error: identity.errors.InvalidRequest
-        summary: 'The challenge must be 43 base64url characters (src/lib.rs:3460).'
+        summary: 'The challenge must be 43 base64url characters (src/lib.rs:3457).'
 
       - name: weak-state
         when: {any: [state.count < 32, state.count > 512]}
         error: identity.errors.InvalidRequest
-        summary: '"state must carry at least 192 bits" (src/lib.rs:3466-3468).'
+        summary: '"state must carry at least 192 bits" (src/lib.rs:3462-3464).'
 
       - name: weak-nonce
         when: {all: [not defined(resource), not defined(nonce)]}
         error: identity.errors.InvalidRequest
         summary: >-
           '"nonce must carry at least 192 bits": without a resource a nonce of 32-512 base64url
-          characters is required (src/lib.rs:3469-3477). Only its absence is declared.'
+          characters is required (src/lib.rs:3465-3472). Only its absence is declared.'
+
+      - name: unknown-provider
+        before_row: true
+        external: >-
+          identity_provider names no configured upstream provider, or none was named while several
+          are configured (selected_upstream_provider src/lib.rs:2996, 3476-3494)
+        error: identity.errors.InvalidRequest
 
       - name: login-capacity
         when_related:
@@ -271,31 +303,8 @@ commands:
         error: identity.errors.ServerError
         summary: >-
           MAX_LOGIN_TRANSACTIONS = 4096 (src/lib.rs:71), counted after expired rows are collected
-          (prepare_insert src/lib.rs:1967-2048). The `where:` selects every row.
-
-      - name: cli-redirect-refused
-        external: >-
-          client_id is the configured CLI client and redirect_uri is not the exact http loopback
-          /callback URI with an ephemeral port (src/lib.rs:3438-3440, 3496-3513)
-        error: identity.errors.InvalidRequest
-
-      - name: unknown-client
-        external: >-
-          client_id and redirect_uri are not one registered web client's exact pair
-          (IDENTITY_WEB_CLIENTS_JSON, src/lib.rs:3441-3448)
-        error: identity.errors.AccessDenied
-
-      - name: resource-not-admitted
-        external: >-
-          the resource names no access audience of the deployment's audience registry
-          (src/lib.rs:3452-3455)
-        error: identity.errors.AccessDenied
-
-      - name: unknown-provider
-        external: >-
-          identity_provider names no configured upstream provider, or none was named while several
-          are configured (selected_upstream_provider src/lib.rs:3476-3494)
-        error: identity.errors.InvalidRequest
+          (prepare_insert src/lib.rs:1967-2048), at the insert (src/lib.rs:3033-3052). The
+          `where:` selects every row.
 
       - name: started
         creates: identity.login.LoginTransaction
@@ -318,77 +327,24 @@ commands:
         payload:
           identity.login.LoginStarted: {upstream_state: {generated: true}}
         summary: >-
-          The transaction is stored (src/lib.rs:3034-3052) and the browser is redirected to the
+          The transaction is stored (src/lib.rs:3033-3052) and the browser is redirected to the
           upstream authorization URL with S256 PKCE and scopes email and profile
           (src/lib.rs:3009-3032).
 
-  - name: identity.login.SignInLocally
-    # GET /oauth/authorize in a `local-login` build: local_login::complete src/local_login.rs:63-112,
-    # reached from src/lib.rs:2992-2995; with PR 23 (origin/fix/local-login-offline) the build may
-    # run with no upstream provider and then takes the configured tenant.
-    naming:
-      wire: sign-in-locally
-      display: Sign in locally (development build only)
-      summary: >-
-        Exists only in a debug, unoptimized build with the non-default `local-login` feature on a
-        loopback listener and origin (src/lib.rs:49-63, src/local_login.rs:47-55, AGENTS.md
-        invariant 8). It mints the ordinary authorization code for a typed mailbox. The request is
-        the Authorize request plus login_hint (src/lib.rs:2218-2221); the Authorize checks run
-        first (src/lib.rs:2987) and are not repeated here.
-    input:
-      - {name: client_id, type: String}
-      - {name: redirect_uri, type: String}
-      - {name: scope, type: String}
-      - {name: state, type: String}
-      - {name: code_challenge, type: String}
-      - {name: resource, type: Optional<String>}
-      - {name: login_hint, type: Optional<String>}
-    outcomes:
-      - name: code-capacity
-        when: defined(login_hint)
-        when_related:
-          entity: identity.login.AuthorizationCode
-          where: defined(code_hash)
-          count: {gte: 4096}
-        error: identity.errors.ServerError
-        summary: MAX_AUTHORIZATION_CODES = 4096 (src/lib.rs:72), via put_code (src/lib.rs:1544-1550).
-
-      - name: form
-        when: not defined(login_hint)
-        accepts: nothing
-        summary: 'With no login_hint the route answers the sign-in form (src/local_login.rs:72-74).'
-
-      - name: not-a-mailbox
-        external: 'login_hint is not a bounded ASCII mailbox (normalize_email src/lib.rs:679-696; src/local_login.rs:75-76)'
-        error: identity.errors.InvalidRequest
-
-      - name: tenant-needs-claim
-        external: >-
-          the first configured provider resolves its tenant from a verified upstream claim, which a
-          local sign-in does not have (src/local_login.rs:77-87; PR 23 takes the configured tenant
-          when no provider is configured)
-        error: identity.errors.AccessDenied
-
-      - name: signed-in
-        creates: identity.login.AuthorizationCode
-        instance: code_hash
-        sets:
-          client_id: input.client_id
-          redirect_uri: input.redirect_uri
-          code_challenge: input.code_challenge
-          requested_audience: input.resource
-          requested_scope: input.scope
-          created_at: {generated: true}
-          tenant_id: {generated: true}
-          # UNMAPPED: subject is "local-login:" + the lowercased mailbox and email the lowercased
-          # mailbox (src/local_login.rs:97-99); ESS has no string concatenation or lowercasing in
-          # `sets:`.
-          subject: {generated: true}
-          email: {generated: true}
-        emits: [identity.login.AuthorizationCodeIssued]
-        payload:
-          identity.login.AuthorizationCodeIssued: {code_hash: {generated: true}}
-        summary: 'Redirects to redirect_uri with code and state (src/local_login.rs:106-111).'
+  # UNMAPPED: the local development login is not declared. In a debug, unoptimized build with the
+  # non-default `local-login` feature on a loopback listener and origin (src/lib.rs:36-63,
+  # src/main.rs:31-42, src/local_login.rs:47-56; AGENTS.md invariant 8), GET /oauth/authorize
+  # answers itself after the Authorize checks (src/lib.rs:2987, 2991-2995; local_login::complete
+  # src/local_login.rs:63-112): with no login_hint it answers a sign-in form; otherwise it
+  # refuses a login_hint that is not a bounded ASCII mailbox (400, src/lib.rs:679-696) and a
+  # tenant that needs a verified upstream claim (401, src/local_login.rs:77-87; PR 23 takes the
+  # configured tenant when no provider is configured), and mints the ordinary authorization code
+  # for subject "local-login:" + the lowercased mailbox (src/local_login.rs:97-99), held to
+  # MAX_AUTHORIZATION_CODES. No shipped build contains it, and ESS gives a command one handler,
+  # the component owning its domain (validate: ESS-COMPONENT-004), so a development-only
+  # component cannot accept a command of identity.login while the deployed `identity` component
+  # does not. What would settle it: a component or build variant that accepts a command only in
+  # a named build.
 
   - name: identity.login.CompleteUpstreamLogin
     # GET /oauth/callback/upstream, upstream_callback() src/lib.rs:3110-3339.
@@ -425,23 +381,27 @@ commands:
         error: identity.errors.InvalidRequest
         summary: '"missing state" (src/lib.rs:3124-3126).'
 
-      - name: missing-code
-        when: not defined(code)
-        error: identity.errors.InvalidRequest
-        summary: '"missing authorization code" (src/lib.rs:3136-3138), checked after the transaction is taken.'
-
       - name: unknown-state
         when_related: {via: input.state, exists: false}
         error: identity.errors.AccessDenied
         summary: '"unknown or already-used login state" (src/lib.rs:3127-3132).'
 
-      - name: code-capacity
-        when_related:
-          entity: identity.login.AuthorizationCode
-          where: defined(code_hash)
-          count: {gte: 4096}
-        error: identity.errors.ServerError
-        summary: MAX_AUTHORIZATION_CODES = 4096 (src/lib.rs:72) on the sign-in path (src/lib.rs:3311-3326).
+      - name: missing-code
+        when_related: {via: input.state, predicate: not defined(input.code)}
+        error: identity.errors.InvalidRequest
+        summary: >-
+          '"missing authorization code" (src/lib.rs:3136-3138): checked after the transaction is
+          taken, so a known state is required first; written over the transaction row so that it
+          answers after unknown-state.'
+
+      # UNMAPPED: the sign-in branch is refused 500 at MAX_AUTHORIZATION_CODES = 4096
+      # (src/lib.rs:72, put_code at src/lib.rs:3314-3330); a link login mints no code and is not
+      # held to it (src/lib.rs:3200-3250). The branch is selected by the transaction's
+      # link_subject, and ESS's `when_related: all:` admits only `{via: input.<f>, predicate: …}`
+      # elements, so the row-set count cannot be joined to that predicate; an unscoped cap would
+      # refuse link logins too, and the code checks the cap after every external refusal below.
+      # The cap is not declared. What would settle it: a row-set count beside a named-row
+      # predicate in one `when_related: all:`.
 
       - name: provider-gone
         external: 'the provider that started the login is no longer configured (src/lib.rs:3139-3144)'
@@ -493,7 +453,7 @@ commands:
           identity.login.IdentityLinked: {link_key: {generated: true}}
         summary: >-
           A link login records the link for link_subject and answers an HTML page
-          (src/lib.rs:3199-3250). The values come from the transaction and the verified token.
+          (src/lib.rs:3200-3250). The values come from the transaction and the verified token.
           An existing link to the same person answers the same page and writes nothing
           (src/lib.rs:3210-3220); that no-op branch is UNMAPPED because only the upstream token
           selects it.
@@ -517,7 +477,7 @@ commands:
         summary: >-
           Mints the code bound to the transaction's client, redirect, challenge, audience and scope
           and to the resolved tenant and subject, and redirects to redirect_uri with code and
-          state (src/lib.rs:3309-3338). UNMAPPED: the copied values are read from the transaction
+          state (src/lib.rs:3314-3338). UNMAPPED: the copied values are read from the transaction
           and from the verified token; a first login without a link also inserts an identity
           link (src/lib.rs:3266-3307) whose subject is the upstream subject for the first
           configured provider and "identity_person_v1_" + 24 random bytes otherwise. An outcome
@@ -541,17 +501,26 @@ commands:
     # "`caller.subject` reads `caller`, which is not a declared observable root"). What would
     # settle it: caller attributes in selectors, or the session principal as an input.
     outcomes:
+      - name: session-refused
+        before_row: true
+        external: >-
+          x-b10x-audience is missing or not a session audience the registry admits, or the bearer
+          is no live Identity session for it (admitted_session_for_link_management
+          src/lib.rs:2861-2869, 2537-2567); checked first (src/lib.rs:2889)
+        error: identity.errors.AccessDenied
+
+      - name: unknown-provider
+        before_row: true
+        external: 'provider_id names no configured upstream provider (src/lib.rs:2890, 3476-3494)'
+        error: identity.errors.InvalidRequest
+
       - name: login-capacity
         when_related:
           entity: identity.login.LoginTransaction
           where: defined(upstream_state)
           count: {gte: 4096}
         error: identity.errors.ServerError
-        summary: MAX_LOGIN_TRANSACTIONS = 4096 (src/lib.rs:71) via put_login (src/lib.rs:2941-2958).
-
-      - name: unknown-provider
-        external: 'provider_id names no configured upstream provider (src/lib.rs:2890, 3476-3483)'
-        error: identity.errors.InvalidRequest
+        summary: MAX_LOGIN_TRANSACTIONS = 4096 (src/lib.rs:71), at the insert (put_login src/lib.rs:2939-2958).
 
       - name: started
         creates: identity.login.LoginTransaction
@@ -602,7 +571,7 @@ views:
       - {name: provider_id, type: String}
       - {name: issuer, type: String}
       - {name: email, type: Optional<String>}
-      - {name: created_at, type: Integer}     # wire name linked_at, src/lib.rs:2193
+      - {name: created_at, type: Integer}     # wire name linked_at, src/lib.rs:2192
     naming:
       wire: identity-links
       display: Linked identities

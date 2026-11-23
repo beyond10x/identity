@@ -2,28 +2,28 @@ domain: identity.directory
 
 summary: >-
   The organization directory: tenant-scoped memberships (principals) and flat groups of direct
-  members (src/directory.rs:1-28). A directory group carries no authority; only deployment
+  members (src/directory.rs:1-29). A directory group carries no authority; only deployment
   static groups reach an authority response (README.md "The rules that shape the code").
   Every route needs a session presented with the exact audience urn:b10x:directory
-  (src/directory.rs:44, src/lib.rs:2537-2566); writes also need the static group
-  identity-directory-admin (src/directory.rs:48, 304-319).
+  (src/directory.rs:44, src/lib.rs:2537-2567); writes also need the static group
+  identity-directory-admin (src/directory.rs:48, 316-330).
 
 naming:
   wire: directory
   display: Directory
 
 # Tenant scoping, decision D6: every row is keyed by (tenant_id, ...) and the tenant is always the
-# presented session's (src/directory.rs:739, 774, 810, 879). The identities below leave the tenant
+# presented session's (src/directory.rs:719, 765, 800, 856). The identities below leave the tenant
 # out and carry it as a field.
 # UNMAPPED: the composite keys PRIMARY KEY (tenant_id, subject), (tenant_id, group_key) and
-# (tenant_id, group_key, subject) (src/directory.rs:160, 168, 175). The tenant comes from the
+# (tenant_id, group_key, subject) (src/directory.rs:166, 174, 181). The tenant comes from the
 # session, and ESS addresses a record by an input, not by a caller attribute. What would settle
 # it: caller attributes in `instance:` and selectors.
 
 types:
   - name: identity.directory.Subject
     naming:
-      summary: 'A principal subject, 1-255 printable ASCII characters after trimming (validated_subject src/directory.rs:216-226).'
+      summary: 'A principal subject, 1-255 printable ASCII characters after trimming (validated_subject src/directory.rs:225-235).'
     kind: newtype
     of: String
 
@@ -31,26 +31,26 @@ types:
     naming:
       summary: >-
         A group key: trimmed, ASCII-lowercased, 1-64 characters, a lowercase letter first, then
-        lowercase letters, digits, `-` or `_` (validated_group_key src/directory.rs:228-241).
+        lowercase letters, digits, `-` or `_` (validated_group_key src/directory.rs:237-250).
         UNMAPPED: the code lowercases before storing; ESS has no lowercasing value.
     kind: newtype
     of: String
 
   - name: identity.directory.PrincipalKind
     naming:
-      summary: 'PRINCIPAL_KINDS (src/directory.rs:50). The code trims and ASCII-lowercases the request first (src/directory.rs:256); the enum admits only the stored spellings.'
+      summary: 'PRINCIPAL_KINDS (src/directory.rs:50). The code trims and ASCII-lowercases the request first (src/directory.rs:265); the enum admits only the stored spellings.'
     kind: enum
     variants: [agent, human, service]
 
   - name: identity.directory.MembershipStatus
     naming:
-      summary: 'MEMBERSHIP_STATUSES (src/directory.rs:51), trimmed and lowercased first (src/directory.rs:266).'
+      summary: 'MEMBERSHIP_STATUSES (src/directory.rs:51), trimmed and lowercased first (src/directory.rs:275).'
     kind: enum
     variants: [active, suspended]
 
   - name: identity.directory.MembershipKey
     naming:
-      summary: 'PRIMARY KEY (tenant_id, group_key, subject) of directory_group_members, tenant left out (src/directory.rs:175).'
+      summary: 'PRIMARY KEY (tenant_id, group_key, subject) of directory_group_members, tenant left out (src/directory.rs:181).'
     kind: struct
     fields:
       - {name: group_key, type: identity.directory.GroupKey}
@@ -58,38 +58,38 @@ types:
 
 entities:
   - name: identity.directory.DirectoryPrincipal
-    # read from: table directory_principals src/directory.rs:150-160; MemberRecord
-    # src/directory.rs:61-68; write_member (upsert) src/directory.rs:405-462.
+    # read from: table directory_principals src/directory.rs:157-167; MemberRecord
+    # src/directory.rs:64-70; write_member (upsert) src/directory.rs:378-437.
     naming:
       summary: >-
         An organization membership: a human, agent or service principal of the session's tenant.
-        Only a human may carry an email (src/directory.rs:283-299). Never deleted: no route removes
+        Only a human may carry an email (src/directory.rs:284-299). Never deleted: no route removes
         one.
     identity:
       name: subject
       type: identity.directory.Subject
     fields:
-      - name: tenant_id                  # src/directory.rs:151
+      - name: tenant_id                  # src/directory.rs:158
         type: String
-      - name: principal_kind             # src/directory.rs:153
+      - name: principal_kind             # src/directory.rs:160
         type: identity.directory.PrincipalKind
-      - name: email                      # src/directory.rs:154
+      - name: email                      # src/directory.rs:161
         type: Optional<String>
-      - name: display_name               # 1-128 characters, src/directory.rs:243-253
+      - name: display_name               # 1-128 characters, src/directory.rs:252-262
         type: String
-      - name: created_at                 # unix seconds, src/directory.rs:157
+      - name: created_at                 # unix seconds, src/directory.rs:164
         type: Integer
-      - name: updated_at                 # src/directory.rs:158
+      - name: updated_at                 # src/directory.rs:165
         type: Integer
-      - name: status                     # src/directory.rs:155; MEMBERSHIP_STATUSES src/directory.rs:51
+      - name: status                     # src/directory.rs:163; MEMBERSHIP_STATUSES src/directory.rs:51
         type: identity.directory.MembershipStatus
         summary: >-
-          A suspended membership resolves to no groups and joins none (src/directory.rs:573-574,
-          812-816). Decision D7: a field, not the lifecycle, because a create may store either
+          A suspended membership resolves to no groups and joins none (src/directory.rs:596, 907-913,
+          813-817). Decision D7: a field, not the lifecycle, because a create may store either
           value and ESS creates into a state chosen by no input on a create-or-update branch
           (validate: "the branch an identity no record carries takes is decided by nothing else").
     invariants:
-      # validated_email refuses an email on any principal that is not human (src/directory.rs:290-294).
+      # validated_email refuses an email on any principal that is not human (src/directory.rs:291-295).
       - {any: [principal_kind == human, not defined(email)]}
     lifecycle:
       # Structural: the status column is the field above.
@@ -98,21 +98,21 @@ entities:
       terminal: [Recorded]
 
   - name: identity.directory.DirectoryGroup
-    # read from: table directory_groups src/directory.rs:161-168; GroupRecord src/directory.rs:78-82;
-    # write_group (upsert) src/directory.rs:479-512.
+    # read from: table directory_groups src/directory.rs:168-175; GroupRecord src/directory.rs:80-83;
+    # write_group (upsert) src/directory.rs:479-514.
     naming:
       summary: A flat named group of the session's tenant. Never deleted; no route removes one.
     identity:
       name: group_key
       type: identity.directory.GroupKey
     fields:
-      - name: tenant_id                  # src/directory.rs:162
+      - name: tenant_id                  # src/directory.rs:169
         type: String
-      - name: display_name               # src/directory.rs:164
+      - name: display_name               # src/directory.rs:171
         type: String
-      - name: created_at                 # src/directory.rs:165
+      - name: created_at                 # src/directory.rs:172
         type: Integer
-      - name: updated_at                 # src/directory.rs:166
+      - name: updated_at                 # src/directory.rs:173
         type: Integer
     relations:
       - name: members                    # decision D8, see GroupMembership
@@ -127,25 +127,25 @@ entities:
       terminal: [Recorded]
 
   - name: identity.directory.GroupMembership
-    # read from: table directory_group_members src/directory.rs:169-180; write_group_member
-    # src/directory.rs:514-543 (ON CONFLICT DO NOTHING); erase_group_member src/directory.rs:545-570.
+    # read from: table directory_group_members src/directory.rs:176-186; write_group_member
+    # src/directory.rs:516-546 (ON CONFLICT DO NOTHING); erase_group_member src/directory.rs:548-574.
     naming:
       summary: One direct membership of a principal in a group. Groups never contain groups (src/directory.rs:12-17).
     identity:
       name: membership_key
       type: identity.directory.MembershipKey
     fields:
-      - name: tenant_id                  # src/directory.rs:170
+      - name: tenant_id                  # src/directory.rs:177
         type: String
-      - name: group_key                  # FOREIGN KEY to directory_groups, src/directory.rs:176-177
+      - name: group_key                  # FOREIGN KEY to directory_groups, src/directory.rs:182-183
         type: identity.directory.GroupKey
-      - name: subject                    # FOREIGN KEY to directory_principals, src/directory.rs:178-179
+      - name: subject                    # FOREIGN KEY to directory_principals, src/directory.rs:184-185
         type: identity.directory.Subject
-      - name: added_at                   # src/directory.rs:173
+      - name: added_at                   # src/directory.rs:180
         type: Integer
     relations:
       # Decision D8: no route deletes a group or a principal. Both foreign keys have no ON DELETE
-      # action (src/directory.rs:176-179) and SQLite runs with foreign_keys=ON (src/lib.rs:1092),
+      # action (src/directory.rs:182-185) and SQLite runs with foreign_keys=ON (src/lib.rs:1092),
       # so a membership cannot outlive its group or its principal: a delete of either would be
       # refused while memberships remain. The group is taken as the owner (README.md: "512
       # members per group"); ESS refuses a second owner, so the principal side is `references`.
@@ -164,7 +164,7 @@ actors:
   - name: identity.directory.DirectoryApplication
     # An in-cluster consumer presenting the person's session with x-b10x-audience
     # urn:b10x:directory (src/directory.rs:43-44; README.md "Audiences"). Attributes: what the
-    # session resolves to (src/lib.rs:1738). Decision D2.
+    # session resolves to (src/lib.rs:1736). Decision D2.
     naming:
       display: Directory application
     attributes:
@@ -198,26 +198,16 @@ events:
       - {name: subject, type: identity.directory.Subject}
       - {name: removed, type: Integer}
 
-outcome_groups:
-  - name: directory-session
-    domain: identity.directory
-    outcomes:
-      - name: directory-session-refused
-        external: >-
-          x-b10x-audience is not urn:b10x:directory, or the bearer is no live Identity session
-          (admitted_session_for_audiences src/lib.rs:2548-2566); the code checks this first
-        error: identity.errors.AccessDenied
-
 commands:
   - name: identity.directory.SaveMember
-    # PUT /v1/directory/members/{subject}, upsert_member src/directory.rs:728-771; MemberRequest
-    # src/directory.rs:84-93 (deny_unknown_fields).
+    # PUT /v1/directory/members/{subject}, upsert_member src/directory.rs:710-751; MemberRequest
+    # src/directory.rs:85-94 (deny_unknown_fields).
     naming:
       wire: save-member
       display: Save an organization membership
       summary: >-
         Creates or replaces the membership of one principal in the session's tenant and answers
-        the MemberView (src/directory.rs:98-107, 762-770).
+        the MemberView (src/directory.rs:102-111, 742-750).
     input:
       - {name: subject, type: identity.directory.Subject}
       - {name: principal_kind, type: identity.directory.PrincipalKind}
@@ -225,22 +215,38 @@ commands:
       - {name: email, type: Optional<String>}
       - {name: status, type: Optional<identity.directory.MembershipStatus>}
     # UNMAPPED: a new principal is refused past 100 000 per tenant (MAX_DIRECTORY_PRINCIPALS
-    # src/directory.rs:54, 739-755), and an existing one is admitted at any count. ESS answers the
+    # src/directory.rs:54, 720-738), and an existing one is admitted at any count. ESS answers the
     # create-or-update existence step before every row-set guard, so a cap only on the creating
     # branch is not declarable.
     # UNMAPPED: the display name is trimmed and counted in characters, control characters refused
-    # (src/directory.rs:243-253); the email is trimmed, lowercased and checked as a bounded ASCII
-    # mailbox (src/directory.rs:283-299, src/lib.rs:679-696). Only the bounds below are declared.
+    # (src/directory.rs:252-262); the email is trimmed, lowercased and checked as a bounded ASCII
+    # mailbox (src/directory.rs:287-299, src/lib.rs:679-696). Only the bounds below are declared.
     outcomes:
+      - name: directory-session-refused
+        before_row: true
+        external: >-
+          x-b10x-audience is not urn:b10x:directory, or the bearer is no live Identity session
+          (admitted_session_for_audience src/lib.rs:2537-2567); checked first
+          (src/directory.rs:716-717)
+        error: identity.errors.AccessDenied
+
+      - name: not-directory-admin
+        before_row: true
+        external: >-
+          the session's static groups lack identity-directory-admin (require_directory_admin
+          src/directory.rs:316-330; deployment configuration, never the directory itself);
+          checked second, before any field of the request (src/directory.rs:716-717)
+        error: identity.errors.Forbidden
+
       - name: email-on-machine
         when: {all: [principal_kind != human, defined(email)]}
         error: identity.errors.InvalidRequest
-        summary: '"only a human principal may carry an email address" (src/directory.rs:290-294).'
+        summary: '"only a human principal may carry an email address" (src/directory.rs:291-295).'
 
       - name: bad-display-name
         when: {any: [display_name.count < 1, display_name.count > 128]}
         error: identity.errors.InvalidRequest
-        summary: '"a display name must be 1-128 characters without control characters" (src/directory.rs:243-253).'
+        summary: '"a display name must be 1-128 characters without control characters" (src/directory.rs:252-262).'
 
       - name: created
         unknown_instance: true
@@ -257,7 +263,7 @@ commands:
         emits: [identity.directory.MemberSaved]
         payload:
           identity.directory.MemberSaved: {subject: input.subject}
-        summary: 'A new membership; an absent status stores active (src/directory.rs:265-273, 405-423).'
+        summary: 'A new membership; an absent status stores active (src/directory.rs:274-282, 386-406).'
 
       - name: replaced
         updates: identity.directory.DirectoryPrincipal
@@ -271,31 +277,40 @@ commands:
         emits: [identity.directory.MemberSaved]
         payload:
           identity.directory.MemberSaved: {subject: input.subject}
-        summary: 'Every column but created_at is replaced (ON CONFLICT DO UPDATE src/directory.rs:418-423).'
-
-
-      - name: not-directory-admin
-        external: >-
-          the session's static groups lack identity-directory-admin (require_directory_admin
-          src/directory.rs:304-319; deployment configuration, never the directory itself)
-        error: identity.errors.Forbidden
+        summary: 'Every column but created_at is replaced (ON CONFLICT DO UPDATE src/directory.rs:391-396).'
 
   - name: identity.directory.SaveGroup
-    # PUT /v1/directory/groups/{group_key}, upsert_group src/directory.rs:773-807.
+    # PUT /v1/directory/groups/{group_key}, upsert_group src/directory.rs:753-789.
     naming:
       wire: save-group
       display: Save a group
-      summary: Creates or renames one group of the session's tenant and answers the GroupView (src/directory.rs:806, 976-1000).
+      summary: Creates or renames one group of the session's tenant and answers the GroupView (src/directory.rs:788, 933-959).
     input:
       - {name: group_key, type: identity.directory.GroupKey}
       - {name: display_name, type: String}
     # UNMAPPED: a new group is refused past 10 000 per tenant (MAX_DIRECTORY_GROUPS
-    # src/directory.rs:55, 784-800); not declarable on the creating branch, as for SaveMember.
+    # src/directory.rs:55, 766-784); not declarable on the creating branch, as for SaveMember.
     outcomes:
+      - name: directory-session-refused
+        before_row: true
+        external: >-
+          x-b10x-audience is not urn:b10x:directory, or the bearer is no live Identity session
+          (admitted_session_for_audience src/lib.rs:2537-2567); checked first
+          (src/directory.rs:759-760)
+        error: identity.errors.AccessDenied
+
+      - name: not-directory-admin
+        before_row: true
+        external: >-
+          the session's static groups lack identity-directory-admin (require_directory_admin
+          src/directory.rs:316-330; deployment configuration, never the directory itself);
+          checked second, before any field of the request (src/directory.rs:759-760)
+        error: identity.errors.Forbidden
+
       - name: bad-display-name
         when: {any: [display_name.count < 1, display_name.count > 128]}
         error: identity.errors.InvalidRequest
-        summary: 'src/directory.rs:243-253.'
+        summary: 'src/directory.rs:252-262.'
 
       - name: created
         unknown_instance: true
@@ -320,14 +335,10 @@ commands:
         payload:
           identity.directory.GroupSaved: {group_key: input.group_key}
 
-      - name: not-directory-admin
-        external: 'the session lacks the identity-directory-admin static group (src/directory.rs:304-319)'
-        error: identity.errors.Forbidden
-
   - name: identity.directory.AddGroupMember
     # PUT /v1/directory/groups/{group_key}/members/{subject}, add_group_member
-    # src/directory.rs:809-845; with PR 21 (origin/fix/directory-cap) admit_group_member counts 0
-    # for a membership that already exists, so a repeated save is admitted at any count.
+    # src/directory.rs:791-845; with PR 21 (now on main) admit_group_member counts 0
+    # for a membership that already exists, so a repeated save is admitted at any count (origin/main src/directory.rs:818, 825-878).
     naming:
       wire: add-group-member
       display: Add a group member
@@ -336,20 +347,36 @@ commands:
       - {name: group_key, type: identity.directory.GroupKey}
       - {name: subject, type: identity.directory.Subject}
     outcomes:
+      - name: directory-session-refused
+        before_row: true
+        external: >-
+          x-b10x-audience is not urn:b10x:directory, or the bearer is no live Identity session
+          (admitted_session_for_audience src/lib.rs:2537-2567); checked first
+          (src/directory.rs:796-797)
+        error: identity.errors.AccessDenied
+
+      - name: not-directory-admin
+        before_row: true
+        external: >-
+          the session's static groups lack identity-directory-admin (require_directory_admin
+          src/directory.rs:316-330; deployment configuration, never the directory itself);
+          checked second, before any field of the request (src/directory.rs:796-797)
+        error: identity.errors.Forbidden
+
       - name: no-group
         when_related: {via: input.group_key, exists: false}
         error: identity.errors.NotFound
-        summary: '"no such group in this tenant" (src/directory.rs:819-822).'
+        summary: '"no such group in this tenant" (src/directory.rs:801-804).'
 
       - name: no-membership
         when_related: {via: input.subject, exists: false}
         error: identity.errors.Unprocessable
-        summary: '"a group member must already hold an organization membership in this tenant" (src/directory.rs:823-830).'
+        summary: '"a group member must already hold an organization membership in this tenant" (src/directory.rs:805-812).'
 
       - name: suspended-member
         when_related: {via: input.subject, predicate: status == suspended}
         error: identity.errors.Unprocessable
-        summary: '"a suspended organization membership cannot join a group" (src/directory.rs:831-835).'
+        summary: '"a suspended organization membership cannot join a group" (src/directory.rs:813-817).'
 
       - name: group-full
         when_related:
@@ -363,7 +390,7 @@ commands:
         summary: >-
           MAX_GROUP_MEMBERS = 512 (src/directory.rs:56). PR 21 counts 0 when this membership
           exists and the group's rows otherwise; counting the group's other members gives the same
-          answer, so a repeated save at the cap is admitted (origin/fix/directory-cap
+          answer, so a repeated save at the cap is admitted (origin/main src/directory.rs:838-856,
           admit_group_member).
 
       - name: subject-full
@@ -378,7 +405,7 @@ commands:
         summary: 'MAX_SUBJECT_GROUPS = 512 (src/directory.rs:57), same reading of PR 21.'
 
       # UNMAPPED: a repeated save of an existing membership adds nothing and answers the group
-      # (ON CONFLICT DO NOTHING src/directory.rs:527-529; admitted at the caps by PR 21). ESS
+      # (ON CONFLICT DO NOTHING src/directory.rs:526-528; admitted at the caps by PR 21). ESS
       # declares a success that changes nothing as `accepts: nothing` with no other condition, or
       # `preserves:` addressed by an input naming the record; the record's key here is the pair of
       # path inputs. What would settle it: `preserves:` addressed by a struct of inputs.
@@ -395,10 +422,6 @@ commands:
         payload:
           identity.directory.GroupMemberAdded: {membership_key: {group_key: input.group_key, subject: input.subject}}
 
-      - name: not-directory-admin
-        external: 'the session lacks the identity-directory-admin static group (src/directory.rs:304-319)'
-        error: identity.errors.Forbidden
-
   - name: identity.directory.RemoveGroupMember
     # DELETE /v1/directory/groups/{group_key}/members/{subject}, remove_group_member
     # src/directory.rs:847-868.
@@ -410,10 +433,26 @@ commands:
       - {name: group_key, type: identity.directory.GroupKey}
       - {name: subject, type: identity.directory.Subject}
     outcomes:
+      - name: directory-session-refused
+        before_row: true
+        external: >-
+          x-b10x-audience is not urn:b10x:directory, or the bearer is no live Identity session
+          (admitted_session_for_audience src/lib.rs:2537-2567); checked first
+          (src/directory.rs:852-853)
+        error: identity.errors.AccessDenied
+
+      - name: not-directory-admin
+        before_row: true
+        external: >-
+          the session's static groups lack identity-directory-admin (require_directory_admin
+          src/directory.rs:316-330; deployment configuration, never the directory itself);
+          checked second, before any field of the request (src/directory.rs:852-853)
+        error: identity.errors.Forbidden
+
       - name: no-group
         when_related: {via: input.group_key, exists: false}
         error: identity.errors.NotFound
-        summary: '"no such group in this tenant" (src/directory.rs:858-861).'
+        summary: '"no such group in this tenant" (src/directory.rs:857-860).'
 
       - name: not-a-member
         when_related:
@@ -424,7 +463,7 @@ commands:
               - subject == input.subject
           exists: false
         error: identity.errors.NotFound
-        summary: '"no such member in this group" (src/directory.rs:862-867).'
+        summary: '"no such member in this group" (src/directory.rs:861-866).'
 
       - name: removed
         deletes: identity.directory.GroupMembership
@@ -437,18 +476,14 @@ commands:
         payload:
           identity.directory.GroupMemberRemoved: {group_key: input.group_key, subject: input.subject, removed: {count: changed}}
 
-      - name: not-directory-admin
-        external: 'the session lacks the identity-directory-admin static group (src/directory.rs:304-319)'
-        error: identity.errors.Forbidden
-
 views:
   - name: identity.directory.OwnMembership
-    # GET /v1/directory/membership, read_own_membership src/directory.rs:891-929; MembershipView
-    # src/directory.rs:115-128. The code reads the session's own subject; a view cannot read
+    # GET /v1/directory/membership, read_own_membership src/directory.rs:895-931; MembershipView
+    # src/directory.rs:120-131. The code reads the session's own subject; a view cannot read
     # `caller`, so it is a parameter (decision D2).
     # UNMAPPED: `groups` is a join of the member's direct groups, empty when suspended, at most 512
-    # (resolve_subject_groups src/directory.rs:572-640); `groups_carry_authority` is always false;
-    # an absent membership answers 404 (src/directory.rs:900-904). A view is one entity and cannot
+    # (resolve_subject_groups src/directory.rs:578-642); `groups_carry_authority` is always false;
+    # an absent membership answers 404 (src/directory.rs:901-906). A view is one entity and cannot
     # refuse.
     source: identity.directory.DirectoryPrincipal
     consistency: read_your_writes
@@ -467,12 +502,12 @@ views:
       display: Own membership
 
   - name: identity.directory.GroupDetail
-    # GET /v1/directory/groups/{group_key}, read_group_view src/directory.rs:870-889; GroupView
-    # src/directory.rs:130-146.
+    # GET /v1/directory/groups/{group_key}, read_group_view src/directory.rs:870-893; GroupView
+    # src/directory.rs:134-147.
     # UNMAPPED: `members` and `member_count` are the group's active members only, ordered by
-    # subject, at most 512 (resolve_group_members src/directory.rs:642-707); `nested` false,
+    # subject, at most 512 (resolve_group_members src/directory.rs:644-708); `nested` false,
     # `membership` "direct", `carries_authority` false are constants. A reader who is neither a
-    # directory admin nor an active member is refused 403 (src/directory.rs:879-887); a view cannot
+    # directory admin nor an active member is refused 403 (src/directory.rs:882-891); a view cannot
     # refuse.
     source: identity.directory.DirectoryGroup
     consistency: read_your_writes

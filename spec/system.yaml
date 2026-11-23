@@ -1,5 +1,6 @@
 # Retrofitted from the code at origin/fix/profile-revisions plus PR 25 and PR 22, with PR 21
-# (origin/fix/directory-cap) and PR 23 (origin/fix/local-login-offline) read as landed.
+# (origin/fix/directory-cap, now on main) and PR 23 (origin/fix/local-login-offline) read as landed.
+# Line numbers are those of this branch's base (8b77801); a PR 21 line is cited as origin/main.
 # It describes what Identity does today; every declaration cites its source.
 # Identity has no OpenAPI document; the sources are src/*.rs, README.md, AGENTS.md and
 # docs/decisions/0001-0004.
