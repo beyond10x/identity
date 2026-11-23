@@ -46,7 +46,7 @@ remain deployment components and are not published to crates.io.
 ## Build, test, run
 
 The gate is **`bash scripts/gate.sh`**. It runs tests and clippy in *both* feature postures, plus
-four component checks. Green here is the bar for main.
+three component checks. Green here is the bar for main.
 
 | step | command |
 |---|---|
@@ -57,8 +57,10 @@ four component checks. Green here is the bar for main.
 | format | `cargo fmt --all --check` |
 | dev login cannot ship | `bash scripts/check-local-login-refused.sh` |
 | dependency advisories | `bash scripts/check-audit.sh` |
-| brand | `bash scripts/check-brand.sh` |
 | secrets | `bash scripts/check-secrets.sh` |
+
+The former-brand fence is not a step here: it runs organization-wide as Atlas's
+`scripts/check-org-brand.sh`.
 
 Rust 1.89 or newer, edition 2024, `unsafe_code = "forbid"`. The gate and the image build use the
 rustc pinned in `rust-toolchain.toml`.
@@ -71,7 +73,7 @@ IDENTITY_TEST_POSTGRES_URL='postgresql://user:password@host:5432/identity?sslmod
   cargo test --locked the_postgres_arm
 ```
 
-`check-audit.sh` carries one narrowly justified transitive exception: `openidconnect 4.0.1` pulls
+`check-audit.sh` carries one narrowly justified transitive exception: `openidconnect 4.1.0` pulls
 `rsa 0.9` unconditionally, and this service uses it only to verify signatures with public JWKs and
 never holds an RSA private key. The script first proves the dependency path is still exactly
 `identity -> openidconnect -> rsa`; any drift forces re-review, and the exception goes when the
