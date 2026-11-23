@@ -1018,9 +1018,10 @@ async fn initialize_postgres(client: &tokio_postgres::Client) -> Result<()> {
         .await
         .context("initialize identity PostgreSQL schema")?;
     // Additive-only directory and profile tables. Every statement creates a table or index that
-    // did not exist before; no existing table, column, index, or row is altered, rewritten, or
-    // dropped, so applying this to a live database takes no lock on a credential table and an
-    // older binary keeps running unchanged against it.
+    // did not exist before, or adds a nullable column to a profile table; no credential table is
+    // touched and no existing column, index, or row is rewritten or dropped, so applying this to a
+    // live database takes no lock on a credential table and an older binary keeps running
+    // unchanged against it.
     for schema in [directory::POSTGRES_SCHEMA, profile::POSTGRES_SCHEMA] {
         client
             .batch_execute(schema)
@@ -1213,6 +1214,7 @@ impl Store {
         ensure_sqlite_column(&connection, "access_tokens", "email", "TEXT")?;
         connection.execute_batch(directory::SQLITE_SCHEMA)?;
         connection.execute_batch(profile::SQLITE_SCHEMA)?;
+        profile::upgrade_sqlite(&connection)?;
         Ok(Self::Sqlite(Arc::new(SqliteStore {
             connection: Mutex::new(connection),
             capacity_admission: tokio::sync::Mutex::new(()),
@@ -4993,8 +4995,11 @@ mod tests {
             profile::read_statements_from_source(store, tenant, subject, "conversation:thread-1")
                 .await
                 .unwrap()
-                .len(),
-            1
+                .into_iter()
+                .map(|(_, created_state)| created_state)
+                .collect::<Vec<_>>(),
+            [Some("inferred".to_owned())],
+            "the per-source read returns the state the row was created in"
         );
         assert_eq!(
             profile::read_statements_from_source(store, tenant, subject, "conversation:thread-2")

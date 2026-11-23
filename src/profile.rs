@@ -83,7 +83,8 @@ const MAX_PROFILE_STATEMENTS: i64 = 200_000;
 const MAX_PROFILE_CONSENTS: i64 = 100_000;
 const MAX_EXCLUDED_SOURCES: usize = 64;
 
-/// Additive schema for the local single-process store.
+/// Additive schema for the local single-process store. A database created by 0.5.7 or earlier
+/// lacks `profile_statements.created_state`; [`upgrade_sqlite`] adds it.
 pub(crate) const SQLITE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS profile_consents (
        tenant_id TEXT NOT NULL,
        subject TEXT NOT NULL,
@@ -114,13 +115,16 @@ pub(crate) const SQLITE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS profile_conse
        updated_at INTEGER NOT NULL,
        confirmed_at INTEGER,
        resolved_at INTEGER,
-       superseded_by TEXT
+       superseded_by TEXT,
+       created_state TEXT
      );
      CREATE INDEX IF NOT EXISTS profile_statements_by_subject
        ON profile_statements (tenant_id, subject);";
 
-/// Additive schema for the clustered store. Every statement is `IF NOT EXISTS` and no existing
-/// table, column, index, or row is read, rewritten, or dropped.
+/// Additive schema for the clustered store. Every statement is `IF NOT EXISTS`. The one change to
+/// an existing table adds the nullable `profile_statements.created_state` column, which takes no
+/// table rewrite and which an older binary never names; no existing column, index, or row is
+/// rewritten or dropped.
 pub(crate) const POSTGRES_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS profile_consents (
        tenant_id TEXT NOT NULL,
        subject TEXT NOT NULL,
@@ -151,10 +155,18 @@ pub(crate) const POSTGRES_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS profile_con
        updated_at BIGINT NOT NULL,
        confirmed_at BIGINT,
        resolved_at BIGINT,
-       superseded_by TEXT
+       superseded_by TEXT,
+       created_state TEXT
      );
+     ALTER TABLE profile_statements ADD COLUMN IF NOT EXISTS created_state TEXT;
      CREATE INDEX IF NOT EXISTS profile_statements_by_subject
        ON profile_statements (tenant_id, subject);";
+
+/// Brings a `SQLite` database created by 0.5.7 or earlier up to [`SQLITE_SCHEMA`]. Rows written
+/// before keep `created_state` empty.
+pub(crate) fn upgrade_sqlite(connection: &rusqlite::Connection) -> Result<()> {
+    crate::ensure_sqlite_column(connection, "profile_statements", "created_state", "TEXT")
+}
 
 /// One durable profile statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -720,6 +732,9 @@ pub(crate) async fn replace_exclusions(
     Ok(())
 }
 
+/// Inserts a statement. The state it is created in is kept in `created_state` as well, because
+/// `epistemic_state` changes when the person confirms or withdraws it and a repeat delivery is
+/// recognised by the state it was delivered in.
 pub(crate) async fn write_statement(
     store: &Store,
     tenant_id: &str,
@@ -732,8 +747,8 @@ pub(crate) async fn write_statement(
                 "INSERT INTO profile_statements (
                    statement_id, tenant_id, subject, kind, horizon, content, epistemic_state,
                    source_kind, source_reference, observed_at, created_at, updated_at,
-                   confirmed_at, resolved_at, superseded_by
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                   confirmed_at, resolved_at, superseded_by, created_state
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?7)",
                 params![
                     record.statement_id,
                     tenant_id,
@@ -761,8 +776,8 @@ pub(crate) async fn write_statement(
                     "INSERT INTO profile_statements (
                        statement_id, tenant_id, subject, kind, horizon, content, epistemic_state,
                        source_kind, source_reference, observed_at, created_at, updated_at,
-                       confirmed_at, resolved_at, superseded_by
-                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                       confirmed_at, resolved_at, superseded_by, created_state
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $7)",
                     &[
                         &record.statement_id,
                         &tenant_id,
@@ -897,18 +912,19 @@ pub(crate) async fn read_statements(
     }
 }
 
-/// Every statement retained for this person from one source, whatever its state.
+/// Every statement retained for this person from one source, whatever its state, each with the
+/// state it was created in (`None` for a row written before that was recorded).
 pub(crate) async fn read_statements_from_source(
     store: &Store,
     tenant_id: &str,
     subject: &str,
     source_reference: &str,
-) -> Result<Vec<StatementRecord>> {
+) -> Result<Vec<(StatementRecord, Option<String>)>> {
     match store {
         Store::Sqlite(_) => {
             let connection = store.sqlite_connection()?;
             let mut statement = connection.prepare(&format!(
-                "SELECT {STATEMENT_COLUMNS} FROM profile_statements
+                "SELECT {STATEMENT_COLUMNS}, created_state FROM profile_statements
                  WHERE tenant_id = ?1 AND subject = ?2 AND source_reference = ?3
                  ORDER BY statement_id LIMIT ?4"
             ))?;
@@ -919,7 +935,7 @@ pub(crate) async fn read_statements_from_source(
                     source_reference,
                     MAX_STATEMENTS_PER_SUBJECT
                 ],
-                statement_from_sqlite_row,
+                |row| Ok((statement_from_sqlite_row(row)?, row.get(13)?)),
             )?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(Into::into)
@@ -929,7 +945,7 @@ pub(crate) async fn read_statements_from_source(
             .await?
             .query(
                 &format!(
-                    "SELECT {STATEMENT_COLUMNS} FROM profile_statements
+                    "SELECT {STATEMENT_COLUMNS}, created_state FROM profile_statements
                      WHERE tenant_id = $1 AND subject = $2 AND source_reference = $3
                      ORDER BY statement_id LIMIT $4"
                 ),
@@ -941,7 +957,11 @@ pub(crate) async fn read_statements_from_source(
                 ],
             )
             .await
-            .map(|rows| rows.iter().map(statement_from_postgres_row).collect())
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| (statement_from_postgres_row(row), row.get(13)))
+                    .collect()
+            })
             .map_err(Into::into),
     }
 }
@@ -1269,11 +1289,17 @@ pub(crate) async fn create_statement(
         resolved_at: None,
         superseded_by: None,
     };
+    // A repeat delivery of a statement already retained from the same source adds nothing. In
+    // particular it must not bring back what the person withdrew: the withdrawn row stays the
+    // one record of that observation. The check runs before the row caps, so a repeat delivery
+    // to a full profile is the same no-op rather than a capacity refusal, and again under the
+    // admission guard, so the decision to insert is taken while concurrent writers are held.
+    if repeat_delivery(&state.store, &owner, &record)
+        .await
+        .map_err(HttpError::internal)?
+        .is_none()
     {
         let _admission = admit_new_statement(&state, &owner).await?;
-        // A repeat delivery of something already retained from the same source adds nothing. In
-        // particular it must not bring back what the person withdrew: the withdrawn row stays
-        // the one record of that observation.
         if repeat_delivery(&state.store, &owner, &record)
             .await
             .map_err(HttpError::internal)?
@@ -1288,19 +1314,21 @@ pub(crate) async fn create_statement(
     projection_response(&state, &owner).await
 }
 
-/// The form of a statement's content that identifies a delivery: whitespace runs collapsed and
-/// letters lowercased, so a redelivery that differs only in spacing or case is the same one.
+/// The form of a statement's content that identifies a delivery: leading, trailing, and repeated
+/// whitespace collapsed. Case is kept, because it can carry meaning ("works with IT").
 fn delivery_content(content: &str) -> String {
-    content
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The statement already retained for this person from the same source with the same content,
-/// whatever its state. Source plus normalised content is the stable key of a delivery; the row
-/// it finds is the one every lifecycle decision about that observation was recorded on.
+/// The statement already retained for this person that the given delivery repeats, whatever
+/// state the retained one is in now. A delivery is identified by its source, kind, horizon, the
+/// epistemic state it was delivered in, and its content with whitespace collapsed; a statement
+/// that differs in any of them is a different statement. The row found is the one every
+/// lifecycle decision about that statement was recorded on.
+///
+/// A row written before `created_state` was recorded, and since confirmed or withdrawn, no
+/// longer shows the state it was delivered in. It matches a delivery in either learned state,
+/// so a withdrawal recorded by an earlier release still holds.
 async fn repeat_delivery(
     store: &Store,
     owner: &ProfileSubject,
@@ -1315,7 +1343,18 @@ async fn repeat_delivery(
     )
     .await?
     .into_iter()
-    .find(|retained| delivery_content(&retained.content) == content))
+    .find(|(retained, created_state)| {
+        let delivered_state = created_state.as_deref().or_else(|| {
+            LEARNED_STATES
+                .contains(&retained.epistemic_state.as_str())
+                .then_some(retained.epistemic_state.as_str())
+        });
+        retained.kind == record.kind
+            && retained.horizon == record.horizon
+            && delivered_state.is_none_or(|state| state == record.epistemic_state)
+            && delivery_content(&retained.content) == content
+    })
+    .map(|(retained, _)| retained))
 }
 
 fn new_statement_id() -> Result<String, HttpError> {
@@ -2079,7 +2118,8 @@ mod tests {
     }
 
     async fn json_body(response: axum::response::Response) -> serde_json::Value {
-        let bytes = axum::body::to_bytes(response.into_body(), crate::MAX_HTTP_BODY_BYTES)
+        // A full profile is a response larger than any request body Identity admits.
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
@@ -2104,14 +2144,36 @@ mod tests {
         content: &str,
         source_id: &str,
     ) -> serde_json::Value {
-        let response = super::create_statement(
+        json_body(
+            deliver(
+                state,
+                headers,
+                ("preference", None, "observed"),
+                content,
+                source_id,
+            )
+            .await
+            .unwrap(),
+        )
+        .await
+    }
+
+    /// Delivers a learned statement of the given kind, horizon, and epistemic state.
+    async fn deliver(
+        state: &crate::AppState,
+        headers: &axum::http::HeaderMap,
+        (kind, horizon, epistemic_state): (&str, Option<&str>, &str),
+        content: &str,
+        source_id: &str,
+    ) -> Result<axum::response::Response, crate::HttpError> {
+        super::create_statement(
             axum::extract::State(state.clone()),
             headers.clone(),
             axum::Json(super::StatementRequest {
-                kind: "preference".to_owned(),
-                horizon: None,
+                kind: kind.to_owned(),
+                horizon: horizon.map(str::to_owned),
                 content: content.to_owned(),
-                epistemic_state: "observed".to_owned(),
+                epistemic_state: epistemic_state.to_owned(),
                 source: SourceRequest {
                     kind: "conversation".to_owned(),
                     id: source_id.to_owned(),
@@ -2119,8 +2181,231 @@ mod tests {
             }),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn a_repeat_delivery_is_only_the_same_statement_again() {
+        let state = app_state(Store::in_memory().unwrap());
+        let person = signed_in(&state, super::PROFILE_AUDIENCE).await;
+        grant_learning(&state, &person).await;
+        let distinct = [
+            (("preference", None, "observed"), "works with IT"),
+            (("friction", None, "observed"), "works with IT"),
+            (("preference", None, "inferred"), "works with IT"),
+            (("preference", None, "observed"), "works with it"),
+            (
+                ("goal_horizon", Some("session"), "observed"),
+                "ship the release",
+            ),
+            (
+                ("goal_horizon", Some("long_term"), "observed"),
+                "ship the release",
+            ),
+        ];
+        for (shape, content) in distinct {
+            deliver(&state, &person, shape, content, "thread-4")
+                .await
+                .unwrap();
+        }
+        let retained = read_statements(&state.store, TENANT, SUBJECT)
+            .await
+            .unwrap();
+        assert_eq!(
+            retained.len(),
+            distinct.len(),
+            "statements that differ in kind, horizon, state, or case are all retained"
+        );
+        // Each of them delivered again, with other spacing, adds nothing.
+        for (shape, content) in distinct {
+            deliver(&state, &person, shape, &format!(" {content}  "), "thread-4")
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            read_statements(&state.store, TENANT, SUBJECT)
+                .await
+                .unwrap()
+                .len(),
+            distinct.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeat_delivery_to_a_full_profile_is_a_no_op() {
+        let state = app_state(Store::in_memory().unwrap());
+        let person = signed_in(&state, super::PROFILE_AUDIENCE).await;
+        grant_learning(&state, &person).await;
+        let learned = learn(&state, &person, "reviews in the afternoon", "thread-8").await;
+        let observed = learned["statements"][0]["statement_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        super::revoke_statement(
+            axum::extract::State(state.clone()),
+            person.clone(),
+            axum::extract::Path(observed),
+            axum::Json(super::RevocationRequest {
+                epistemic_state: "revoked".to_owned(),
+            }),
+        )
+        .await
         .unwrap();
-        json_body(response).await
+        for filler in 1..super::MAX_STATEMENTS_PER_SUBJECT {
+            write_statement(
+                &state.store,
+                TENANT,
+                SUBJECT,
+                &statement(
+                    &format!("{filler:0>22}"),
+                    "observed",
+                    &format!("filler {filler}"),
+                    "conversation:filler",
+                ),
+            )
+            .await
+            .unwrap();
+        }
+
+        let snapshot = learn(&state, &person, "reviews in the afternoon", "thread-8").await;
+        assert_eq!(
+            snapshot["statement_count"],
+            super::MAX_STATEMENTS_PER_SUBJECT - 1,
+            "the withdrawn observation stays out of the projection"
+        );
+        let refusal = deliver(
+            &state,
+            &person,
+            ("preference", None, "observed"),
+            "a new observation",
+            "thread-8",
+        )
+        .await
+        .expect_err("a new statement past the cap is still refused");
+        assert_eq!(refusal.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            i64::try_from(
+                read_statements(&state.store, TENANT, SUBJECT)
+                    .await
+                    .unwrap()
+                    .len()
+            )
+            .unwrap(),
+            super::MAX_STATEMENTS_PER_SUBJECT
+        );
+    }
+
+    #[tokio::test]
+    async fn a_withdrawal_recorded_before_the_upgrade_still_holds() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        // The 0.5.7 table, without `created_state`, holding one withdrawn observation.
+        connection
+            .execute_batch(
+                "CREATE TABLE profile_statements (
+                   statement_id TEXT PRIMARY KEY,
+                   tenant_id TEXT NOT NULL,
+                   subject TEXT NOT NULL,
+                   kind TEXT NOT NULL,
+                   horizon TEXT,
+                   content TEXT NOT NULL,
+                   epistemic_state TEXT NOT NULL,
+                   source_kind TEXT NOT NULL,
+                   source_reference TEXT NOT NULL,
+                   observed_at INTEGER NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL,
+                   confirmed_at INTEGER,
+                   resolved_at INTEGER,
+                   superseded_by TEXT
+                 );
+                 INSERT INTO profile_statements VALUES (
+                   'identity_profile_statement_v1_mmmmmmmmmmmmmmmmmmmmmm', 'tenant-dev',
+                   'upstream-subject', 'preference', NULL, 'reviews in the afternoon',
+                   'rejected', 'conversation', 'conversation:thread-8', 1, 1, 2, NULL, 2, NULL
+                 );",
+            )
+            .unwrap();
+        let state = app_state(Store::from_sqlite_connection(connection).unwrap());
+        let person = signed_in(&state, super::PROFILE_AUDIENCE).await;
+        grant_learning(&state, &person).await;
+
+        for shape in [
+            ("preference", None, "observed"),
+            ("preference", None, "inferred"),
+        ] {
+            let snapshot = json_body(
+                deliver(
+                    &state,
+                    &person,
+                    shape,
+                    "reviews in the afternoon",
+                    "thread-8",
+                )
+                .await
+                .unwrap(),
+            )
+            .await;
+            assert_eq!(snapshot["statement_count"], 0);
+        }
+        assert_eq!(
+            read_statements(&state.store, TENANT, SUBJECT)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // A statement written after the upgrade records the state it was created in.
+        learn(&state, &person, "reviews in the morning", "thread-8").await;
+        let created_state: Option<String> = state
+            .store
+            .sqlite_connection()
+            .unwrap()
+            .query_row(
+                "SELECT created_state FROM profile_statements WHERE content = ?1",
+                ["reviews in the morning"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(created_state.as_deref(), Some("observed"));
+    }
+
+    /// The reviewer's probe of PR 22: identical deliveries racing on the local store. It fails
+    /// until `SQLite` admission returns a real guard (branch `fix/sqlite-admission`), because the
+    /// repeat check and the insert are not held against each other on that store yet.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[ignore = "needs fix/sqlite-admission"]
+    async fn concurrent_identical_deliveries_store_one_row() {
+        let state = app_state(Store::in_memory().unwrap());
+        let person = signed_in(&state, super::PROFILE_AUDIENCE).await;
+        grant_learning(&state, &person).await;
+        let mut rounds_with_duplicates = 0;
+        for round in 0..20 {
+            let content = format!("probe content {round}");
+            let mut deliveries = Vec::new();
+            for _ in 0..8 {
+                let state = state.clone();
+                let person = person.clone();
+                let content = content.clone();
+                deliveries.push(tokio::spawn(async move {
+                    learn(&state, &person, &content, "thread-race").await;
+                }));
+            }
+            for delivery in deliveries {
+                delivery.await.unwrap();
+            }
+            let copies = read_statements(&state.store, TENANT, SUBJECT)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|record| record.content == content)
+                .count();
+            if copies > 1 {
+                rounds_with_duplicates += 1;
+            }
+        }
+        assert_eq!(
+            rounds_with_duplicates, 0,
+            "concurrent identical deliveries stored duplicates in {rounds_with_duplicates}/20 rounds"
+        );
     }
 
     async fn correct(
@@ -2227,7 +2512,7 @@ mod tests {
         .await
         .unwrap();
 
-        for redelivery in ["reviews in the afternoon", "  Reviews  in the AFTERNOON "] {
+        for redelivery in ["reviews in the afternoon", "  reviews  in the   afternoon "] {
             let snapshot = learn(&state, &person, redelivery, "thread-8").await;
             assert_eq!(
                 snapshot["statement_count"], 0,
