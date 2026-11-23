@@ -30,7 +30,7 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -905,6 +905,57 @@ pub(crate) async fn write_statement_state(
     Ok(changed > 0)
 }
 
+/// Marks a statement as replaced by a correction, but only while it has no replacement yet. The
+/// condition sits in the write itself, so of two corrections against one original exactly one
+/// links it, on either store, whatever the interleaving.
+pub(crate) async fn supersede_statement(
+    store: &Store,
+    tenant_id: &str,
+    subject: &str,
+    record: &StatementRecord,
+) -> Result<bool> {
+    let changed = match store {
+        Store::Sqlite(_) => store.sqlite_connection()?.execute(
+            "UPDATE profile_statements
+             SET epistemic_state = ?4, updated_at = ?5, resolved_at = ?6, superseded_by = ?7
+             WHERE tenant_id = ?1 AND subject = ?2 AND statement_id = ?3
+               AND superseded_by IS NULL",
+            params![
+                tenant_id,
+                subject,
+                record.statement_id,
+                record.epistemic_state,
+                record.updated_at,
+                record.resolved_at,
+                record.superseded_by,
+            ],
+        )?,
+        Store::Postgres(postgres) => {
+            let changed = postgres
+                .client()
+                .await?
+                .execute(
+                    "UPDATE profile_statements
+                     SET epistemic_state = $4, updated_at = $5, resolved_at = $6, superseded_by = $7
+                     WHERE tenant_id = $1 AND subject = $2 AND statement_id = $3
+                       AND superseded_by IS NULL",
+                    &[
+                        &tenant_id,
+                        &subject,
+                        &record.statement_id,
+                        &record.epistemic_state,
+                        &record.updated_at,
+                        &record.resolved_at,
+                        &record.superseded_by,
+                    ],
+                )
+                .await?;
+            usize::try_from(changed).unwrap_or(usize::MAX)
+        }
+    };
+    Ok(changed > 0)
+}
+
 /// Forgetting is a deletion, not a state change. The row and its evidence stop existing.
 pub(crate) async fn erase_statement(
     store: &Store,
@@ -1228,6 +1279,9 @@ pub(crate) async fn correct_statement(
     let owner = own_profile(&state, &headers, &PERSON_CONTROL_AUDIENCES).await?;
     let statement_id = validated_statement_id(&statement_id)?;
     let mut previous = own_statement(&state, &owner, &statement_id).await?;
+    if previous.superseded_by.is_some() {
+        return Err(stale_revision());
+    }
     let kind = match request.kind.as_deref() {
         Some(kind) => validated_kind(kind)?,
         None => previous.kind.clone(),
@@ -1259,8 +1313,34 @@ pub(crate) async fn correct_statement(
     previous.resolved_at = Some(now);
     previous.updated_at = now;
     previous.superseded_by = Some(corrected.statement_id.clone());
-    apply_statement_state(&state, &owner, &previous).await?;
+    if !supersede_statement(&state.store, &owner.tenant_id, &owner.subject, &previous)
+        .await
+        .map_err(HttpError::internal)?
+    {
+        // Another correction superseded the original between the read and this write, or the
+        // original was forgotten. Remove this replacement so at most one current revision exists.
+        erase_statement(
+            &state.store,
+            &owner.tenant_id,
+            &owner.subject,
+            &corrected.statement_id,
+        )
+        .await
+        .map_err(HttpError::internal)?;
+        return Err(stale_revision());
+    }
     durable_response(&state, &owner).await
+}
+
+/// A correction names the revision it replaces. One that names a revision already replaced is
+/// stale: accepting it would leave two confirmed replacements of the same original.
+fn stale_revision() -> HttpError {
+    HttpError {
+        status: StatusCode::CONFLICT,
+        code: "conflict",
+        message: "this statement was already corrected; correct its current revision instead"
+            .to_owned(),
+    }
 }
 
 pub(crate) async fn forget_statement(
@@ -1801,6 +1881,171 @@ mod tests {
                 .groups_for(TENANT, Some("person@example.test")),
             authority_before
         );
+    }
+
+    fn app_state(store: Store) -> crate::AppState {
+        crate::AppState::new(
+            std::sync::Arc::new(config()),
+            std::collections::BTreeMap::new(),
+            openidconnect::reqwest::ClientBuilder::new()
+                .redirect(openidconnect::reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            store,
+        )
+    }
+
+    /// Signs the test person in and returns the headers of a request to the given audience.
+    async fn signed_in(state: &crate::AppState, audience: &str) -> axum::http::HeaderMap {
+        let credential = format!("identity_session_v1_{}", "p".repeat(43));
+        state
+            .store
+            .put_session(
+                &credential,
+                &state.config,
+                TENANT,
+                &crate::Identity {
+                    subject: SUBJECT.to_owned(),
+                    email: Some("person@example.test".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {credential}").parse().unwrap(),
+        );
+        headers.insert("x-b10x-audience", audience.parse().unwrap());
+        headers
+    }
+
+    async fn json_body(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), crate::MAX_HTTP_BODY_BYTES)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn grant_learning(state: &crate::AppState, headers: &axum::http::HeaderMap) {
+        super::put_consent(
+            axum::extract::State(state.clone()),
+            headers.clone(),
+            axum::Json(super::ConsentRequest {
+                learning: true,
+                excluded_sources: Vec::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn learn(
+        state: &crate::AppState,
+        headers: &axum::http::HeaderMap,
+        content: &str,
+        source_id: &str,
+    ) -> serde_json::Value {
+        let response = super::create_statement(
+            axum::extract::State(state.clone()),
+            headers.clone(),
+            axum::Json(super::StatementRequest {
+                kind: "preference".to_owned(),
+                horizon: None,
+                content: content.to_owned(),
+                epistemic_state: "observed".to_owned(),
+                source: SourceRequest {
+                    kind: "conversation".to_owned(),
+                    id: source_id.to_owned(),
+                },
+            }),
+        )
+        .await
+        .unwrap();
+        json_body(response).await
+    }
+
+    async fn correct(
+        state: &crate::AppState,
+        headers: &axum::http::HeaderMap,
+        statement_id: &str,
+        content: &str,
+    ) -> Result<axum::response::Response, crate::HttpError> {
+        super::correct_statement(
+            axum::extract::State(state.clone()),
+            headers.clone(),
+            axum::extract::Path(statement_id.to_owned()),
+            axum::Json(super::CorrectionRequest {
+                content: content.to_owned(),
+                kind: None,
+                horizon: None,
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_second_correction_of_a_superseded_statement_is_refused() {
+        let state = app_state(Store::in_memory().unwrap());
+        let person = signed_in(&state, super::PROFILE_AUDIENCE).await;
+        grant_learning(&state, &person).await;
+        let learned = learn(&state, &person, "prefers calls", "thread-1").await;
+        let original = learned["statements"][0]["statement_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        correct(&state, &person, &original, "prefers written briefs")
+            .await
+            .unwrap();
+        let refusal = correct(&state, &person, &original, "prefers video calls")
+            .await
+            .expect_err("a correction against a superseded statement must be refused");
+        assert_eq!(refusal.status, axum::http::StatusCode::CONFLICT);
+
+        let retained = read_statements(&state.store, TENANT, SUBJECT)
+            .await
+            .unwrap();
+        let confirmed = retained
+            .iter()
+            .filter(|record| record.epistemic_state == CONFIRMED_STATE)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            confirmed.len(),
+            1,
+            "exactly one confirmed replacement may exist"
+        );
+        assert_eq!(confirmed[0].content, "prefers written briefs");
+        let superseded = retained
+            .iter()
+            .find(|record| record.statement_id == original)
+            .unwrap();
+        assert_eq!(
+            superseded.superseded_by.as_deref(),
+            Some(confirmed[0].statement_id.as_str()),
+            "the original keeps its link to the one current revision"
+        );
+        let snapshot = json_body(
+            super::read_snapshot(axum::extract::State(state.clone()), person.clone())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(snapshot["statement_count"], 1);
+        assert_eq!(
+            snapshot["statements"][0]["content"],
+            "prefers written briefs"
+        );
+
+        // The current revision itself can still be corrected.
+        correct(
+            &state,
+            &person,
+            &confirmed[0].statement_id,
+            "prefers video calls",
+        )
+        .await
+        .unwrap();
     }
 
     #[test]

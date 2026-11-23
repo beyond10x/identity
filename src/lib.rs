@@ -4869,6 +4869,7 @@ mod tests {
                 .await
                 .unwrap()
         );
+        exercise_postgres_profile_history(store, tenant, subject, &mut record).await;
         store
             .enforce_row_caps(&[RowCap {
                 sqlite_count: "SELECT count(*) FROM profile_statements WHERE tenant_id = ?1",
@@ -4926,6 +4927,39 @@ mod tests {
             .await
             .unwrap();
         assert!(store.enforce_row_caps(&[cap()]).await.unwrap().is_some());
+    }
+
+    /// The clustered arm of the conditional supersede.
+    async fn exercise_postgres_profile_history(
+        store: &Store,
+        tenant: &str,
+        subject: &str,
+        record: &mut profile::StatementRecord,
+    ) {
+        record.epistemic_state = "inferred".to_owned();
+        record.resolved_at = None;
+        profile::write_statement(store, tenant, subject, record)
+            .await
+            .unwrap();
+        record.epistemic_state = "revoked".to_owned();
+        record.superseded_by = Some("identity_profile_statement_v1_first".to_owned());
+        assert!(
+            profile::supersede_statement(store, tenant, subject, record)
+                .await
+                .unwrap()
+        );
+        record.superseded_by = Some("identity_profile_statement_v1_second".to_owned());
+        assert!(
+            !profile::supersede_statement(store, tenant, subject, record)
+                .await
+                .unwrap(),
+            "a statement that already has a replacement must not be superseded again"
+        );
+        assert!(
+            profile::erase_statement(store, tenant, subject, &record.statement_id)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
