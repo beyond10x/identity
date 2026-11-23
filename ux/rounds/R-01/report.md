@@ -5,6 +5,11 @@ Page: https://beyond10x.github.io/docs/identity/, rendered from identity `e5c4e8
 The harness that wrote this report (Playwright spec, in-page library, round.ts, round.sh) lives unmerged on the
 branch `ux/r01-harness` of beyond10x/identity: https://github.com/beyond10x/identity/tree/ux/r01-harness/ux
 
+Build (phase 2): change set C1-C5 of triage.md is in README.md on `ux/r01`. The page cannot be measured again
+before publication: there is no local render (UXF-012), and the live page renders `e5c4e87`. Until then the
+regression asset is `scripts/check-docs-source.sh`, which `scripts/gate.sh` runs on every merge. It failed
+23 times on `0c85741` and passes on the change set. R-02 measures the published page.
+
 ## Hard gates per viewport x theme
 
 | viewport | theme | gating | 1 page h-scroll px | 1 past box | 2 always-visible misses | 5 axe serious nodes | 5 keyboard unreached | 4 tasks not completed |

@@ -1,5 +1,5 @@
 {
-  "about": "Identity docs page https://beyond10x.github.io/docs/identity/, measured 2026-11-23 in R-01 at source e5c4e873323580945aee7dd2b8941180d644db3e. Values are maxima over the gating viewports (1280x800, 390x844) x themes (light, dark); all lower is better. 9999 = not reached. Known: source-link keyboard.tabs is 19 from a harness that never opened the phone TOC (review-report T1); the review measured 21 at 390x844. The next run with the fixed harness sets it.",
+  "about": "Identity docs page https://beyond10x.github.io/docs/identity/, measured 2026-11-23 in R-01 at source e5c4e873323580945aee7dd2b8941180d644db3e. Values are maxima over the gating viewports (1280x800, 390x844) x themes (light, dark); all lower is better. 9999 = not reached. Known: source-link keyboard.tabs is 19 from a harness that never opened the phone TOC (review-report T1); the review measured 21 at 390x844. The next run with the fixed harness sets it. Scenario source: counts from scripts/check-docs-source.sh on README.md at the R-01 change set (ddde3f2); at 0c85741 they were 7, 0, 14, 1, 1. It runs in scripts/gate.sh on every merge. The rendered-page values above stay R-01 values until the published page renders the change set; they cannot be measured before publication (no local render, UXF-012).",
   "scenarios": {
     "page": {
       "layout.doc_hscroll_px": {
@@ -131,6 +131,28 @@
       "keyboard.tabs": {
         "value": 19,
         "tolerance": 0.05
+      }
+    },
+    "source": {
+      "source.code_lines_over_80": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "source.code_fences_without_language": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "source.table_cells_over_150": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "source.h1_not_display_name": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "source.invariants_heading_missing": {
+        "value": 0,
+        "tolerance": 0
       }
     }
   },
