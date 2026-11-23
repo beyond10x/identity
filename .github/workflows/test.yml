@@ -1,0 +1,85 @@
+name: Component tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  test:
+    name: identity / gate --forge
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: List the files the pull request changes
+        id: changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed-files"
+          sed 's/^/  /' "$RUNNER_TEMP/changed-files"
+          if sh scripts/planning-only.sh < "$RUNNER_TEMP/changed-files"; then
+            echo "planning_only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "planning_only=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read the toolchain of rust-toolchain.toml
+        if: steps.changes.outputs.planning_only != 'true'
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          components=$(sed -n 's/^components = \[\(.*\)\]$/\1/p' rust-toolchain.toml | tr -d '" ')
+          test -n "$channel" || { echo "::error::rust-toolchain.toml names no channel" >&2; exit 1; }
+          echo "RUST_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
+          echo "RUST_COMPONENTS=$components" >> "$GITHUB_ENV"
+          echo "rust-toolchain.toml: $channel ($components)"
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        if: steps.changes.outputs.planning_only != 'true'
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: ${{ env.RUST_COMPONENTS }}
+
+      - name: Install cargo-nextest
+        if: steps.changes.outputs.planning_only != 'true'
+        env:
+          NEXTEST_VERSION: "0.9.143"
+          NEXTEST_SHA256: 66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e
+        run: |
+          set -euo pipefail
+          asset="cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl --fail --silent --show-error --location --output "$asset" \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/$asset"
+          echo "$NEXTEST_SHA256  $asset" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/nextest-bin"
+          tar -xzf "$asset" -C "$RUNNER_TEMP/nextest-bin" cargo-nextest
+          echo "$RUNNER_TEMP/nextest-bin" >> "$GITHUB_PATH"
+
+      - name: bash scripts/gate.sh --forge
+        if: steps.changes.outputs.planning_only != 'true'
+        run: bash scripts/gate.sh --forge
+
+      - name: Planning or prose files only
+        if: steps.changes.outputs.planning_only == 'true'
+        run: echo "every changed file is a planning or prose file (scripts/planning-only.sh); the gate is not run"

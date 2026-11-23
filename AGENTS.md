@@ -117,14 +117,18 @@ Identity answers *who* and *which tenant*. It does not answer *may they*.
 bash scripts/gate.sh
 ```
 
-Each step also runs standalone. In order:
+Needs `cargo-nextest` 0.9.143 (`.config/nextest.toml` requires it). Each step also runs standalone.
+In order:
 
 ```text
-cargo test --workspace --locked
-cargo test --workspace --locked --features local-login
+cargo nextest run --workspace --locked --no-run
+timeout 120 cargo nextest run --workspace --locked
+cargo nextest run --workspace --locked --features local-login --no-run
+timeout 120 cargo nextest run --workspace --locked --features local-login
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy --workspace --all-targets --locked --features local-login -- -D warnings
 cargo fmt --all --check
+sh scripts/planning-only-test.sh
 bash scripts/check-local-login-refused.sh
 bash scripts/check-audit.sh
 bash scripts/check-secrets.sh
@@ -132,6 +136,20 @@ bash scripts/check-secrets.sh
 
 Both feature postures are gated because invariant 8 is a property of *both* builds. Green here is the
 bar for `main`.
+
+**Test budget.** cargo-nextest kills a test that runs over 60 s and counts it failed
+(`.config/nextest.toml`). Each `timeout 120` test step fails when it runs over 120 s of wall time;
+the `--no-run` step before it builds the test binaries, so the budget measures the tests. After each
+test step the gate prints the ten slowest tests (`scripts/slowest-tests.sh`). Test builds carry no
+debug info (`.cargo/config.toml`). The crate has no doctests; add `cargo test --doc` to the gate
+with the first one.
+
+**The forge runs the same gate.** `.github/workflows/test.yml` runs `bash scripts/gate.sh --forge` on
+every pull request and `main` push: every step above except `check-audit.sh` and `check-secrets.sh`.
+It reads the rustc of `rust-toolchain.toml`, installs the same checksum-pinned cargo-nextest, and has
+read-only contents and no secrets. A pull request whose changed files are all planning or prose
+(`scripts/planning-only.sh`: `.engineering/**`, `*.md` outside `src/` and `crates/`) passes the job
+without building; `sh scripts/planning-only-test.sh` holds both sides of that list.
 
 **One rustc.** `rust-toolchain.toml` pins the compiler, clippy and rustfmt the gate runs, and the
 `Dockerfile` builder image carries the same rustc version. Move both in one change. A newly
