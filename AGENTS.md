@@ -149,7 +149,9 @@ every pull request and `main` push: every step above except `check-audit.sh` and
 It reads the rustc of `rust-toolchain.toml`, installs the same checksum-pinned cargo-nextest, and has
 read-only contents and no secrets. A pull request whose changed files are all planning or prose
 (`scripts/planning-only.sh`: `.engineering/**`, `*.md` outside `src/` and `crates/`) passes the job
-without building; `sh scripts/planning-only-test.sh` holds both sides of that list.
+without building. The script diffs the two commits itself with renames off, so a moved code file
+counts by its old path too. `sh scripts/planning-only-test.sh` holds both sides of that list, as path
+lists and as commits of a scratch repository.
 
 **One rustc.** `rust-toolchain.toml` pins the compiler, clippy and rustfmt the gate runs, and the
 `Dockerfile` builder image carries the same rustc version. Move both in one change. A newly

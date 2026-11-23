@@ -22,15 +22,26 @@ elif [ "$#" -ne 0 ]; then
 fi
 
 test_budget=120
-junit=target/nextest/default/junit.xml
+# nextest writes its JUnit report under its store directory, which .config/nextest.toml pins to
+# target/nextest of the workspace root. CARGO_TARGET_DIR does not move it (measured with
+# cargo-nextest 0.9.143: the build went to the set directory, the report stayed here).
+junit=$root/target/nextest/default/junit.xml
 
-# Run one test step under the wall-time budget, then print its ten slowest tests.
+# Run one test step under the wall-time budget, print its ten slowest tests (also when it failed
+# or ran over), then end the gate with the step's status when that is not 0.
 test_step() {
   printf 'gate: timeout %s %s\n' "$test_budget" "$*"
   local started status=0
+  rm -f -- "$junit"
   started=$(date +%s)
   timeout "$test_budget" "$@" || status=$?
   printf 'gate: test step took %ss (budget %ss)\n' "$(($(date +%s) - started))" "$test_budget"
+  if [ -f "$junit" ]; then
+    printf 'gate: slowest tests\n'
+    sh scripts/slowest-tests.sh "$junit" 10
+  else
+    printf 'gate: no JUnit report at %s\n' "$junit"
+  fi
   if [ "$status" -eq 124 ]; then
     printf 'gate: test step ran over %ss: %s\n' "$test_budget" "$*" >&2
     exit 1
@@ -38,8 +49,6 @@ test_step() {
   if [ "$status" -ne 0 ]; then
     exit "$status"
   fi
-  printf 'gate: slowest tests\n'
-  sh scripts/slowest-tests.sh "$junit" 10
 }
 
 printf 'gate: cargo nextest run --workspace --locked --no-run\n'
