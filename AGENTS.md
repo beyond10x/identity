@@ -168,10 +168,15 @@ a fully gated `main` commit. The full gate comes first; component steps alone ar
 repository has no `CHANGELOG.md`; if one is added, its heading is the version the tag carries.
 
 Pushing the tag runs `.github/workflows/release.yml`: it checks that the tag is the `main` tip and
-matches the workspace version, then publishes the GitHub release as the organization bot, or accepts
-a release the bot already published. A release is source only: no runtime image and no
-`release-manifest.json`. The runtime promotion that built them ran in `beyond10x/devcenter`, which
-is archived; 0.5.7 was the first release without them.
+matches the workspace version, builds the repository `Dockerfile` at that commit for `linux/amd64`
+and `linux/arm64`, and pushes `ghcr.io/beyond10x/identity:<version>` (no `latest`; a version that
+already exists is never rebuilt). It then publishes the GitHub release as the organization bot with
+`release-manifest.json` attached: `version`, `source_commit`, `image`
+(`ghcr.io/beyond10x/identity@sha256:…`) and `artifacts.identity_runtime` (the same digest). A
+release is the source, the GHCR image and that manifest. When the release already exists, the job
+passes only if the bot published it; it attaches the manifest when absent and fails when a different
+one is attached. 0.5.7 was published by hand without image or manifest, after the promotion in the
+archived `beyond10x/devcenter` stopped running.
 
 ## Where work is tracked
 
