@@ -167,15 +167,22 @@ The tag is the bare version — `0.2.0`, the version and nothing else (atlas § 
 a fully gated `main` commit. The full gate comes first; component steps alone are not enough. This
 repository has no `CHANGELOG.md`; if one is added, its heading is the version the tag carries.
 
-Pushing the tag runs `.github/workflows/release.yml`: it checks that the tag is the `main` tip and
-matches the workspace version, builds the repository `Dockerfile` at that commit for `linux/amd64`
-and `linux/arm64`, and pushes `ghcr.io/beyond10x/identity:<version>` (no `latest`; a version that
-already exists is never rebuilt). It then publishes the GitHub release as the organization bot with
-`release-manifest.json` attached: `version`, `source_commit`, `image`
+Pushing the tag runs `.github/workflows/release.yml`: it checks that the tag is annotated, is the
+`main` tip and matches the workspace version, builds the repository `Dockerfile` at that commit for
+`linux/amd64` and `linux/arm64`, and pushes `ghcr.io/beyond10x/identity:<version>` (no `latest`). It
+signs that index digest with keyless cosign (the workflow's GitHub OIDC identity,
+`https://github.com/beyond10x/identity/.github/workflows/release.yml@refs/tags/<version>`) and
+verifies the signature in the same job. It then publishes the GitHub release as the organization bot
+with `release-manifest.json` attached: `version`, `source_commit`, `image`
 (`ghcr.io/beyond10x/identity@sha256:…`) and `artifacts.identity_runtime` (the same digest). A
-release is the source, the GHCR image and that manifest. When the release already exists, the job
-passes only if the bot published it; it attaches the manifest when absent and fails when a different
-one is attached. 0.5.7 was published by hand without image or manifest, after the promotion in the
+release is the source, the signed GHCR image and that manifest.
+
+A failed release is resumed by re-running the workflow. When `:<version>` already exists and its
+`org.opencontainers.image.revision` label is the tag commit, the run reuses it and its digest instead
+of rebuilding, and signs it only if no valid signature is there. A different label fails the run, and
+so does any registry error other than "not found". When the release already exists, the job passes
+only if the bot published it; it attaches the manifest when absent and fails when a different one is
+attached. 0.5.7 was published by hand without image or manifest, after the promotion in the
 archived `beyond10x/devcenter` stopped running.
 
 ## Where work is tracked

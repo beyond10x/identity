@@ -21,6 +21,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Require an annotated tag
+        run: |
+          tag_type=$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")
+          if [ "$tag_type" != tag ]; then
+            echo "::error::${GITHUB_REF_NAME} is a ${tag_type}, not an annotated tag"
+            exit 1
+          fi
       - name: Require the provider-reported default branch tip
         id: source
         env:
@@ -58,25 +65,41 @@ jobs:
       IMAGE: ghcr.io/beyond10x/identity
       VERSION: ${{ github.ref_name }}
       ARCH: ${{ matrix.arch }}
+      SOURCE_COMMIT: ${{ needs.validate.outputs.source-commit }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ needs.validate.outputs.source-commit }}
-          persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Refuse to overwrite a published version
+      - name: Reuse a version already published from this commit
+        id: existing
         run: |
-          if docker buildx imagetools inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
-            echo "::error::${IMAGE}:${VERSION} already exists; a released image is never rebuilt"
-            exit 1
+          ref="${IMAGE}:${VERSION}"
+          if out=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' 2>&1); then
+            revisions=$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}' \
+              | jq -c 'if has("config") then [.config.Labels["org.opencontainers.image.revision"]] else [.[] | .config.Labels["org.opencontainers.image.revision"]] end | unique')
+            if [ "$revisions" != "[\"${SOURCE_COMMIT}\"]" ]; then
+              echo "::error::${ref} exists with revision ${revisions}, not ${SOURCE_COMMIT}; it is never replaced"
+              exit 1
+            fi
+            echo "::notice::${ref} already holds ${SOURCE_COMMIT}; not rebuilding"
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          case "$out" in
+            *": not found"*) echo "reuse=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::cannot read ${ref}: ${out}"; exit 1 ;;
+          esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.existing.outputs.reuse == 'false'
+        with:
+          ref: ${{ needs.validate.outputs.source-commit }}
+          persist-credentials: false
       - name: Build and push the runtime image
         id: build
+        if: steps.existing.outputs.reuse == 'false'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -89,6 +112,7 @@ jobs:
           build-args: SOURCE_SHA=${{ needs.validate.outputs.source-commit }}
           tags: ${{ env.IMAGE }}:${{ github.ref_name }}-${{ matrix.arch }}
       - name: Verify the pushed digest
+        if: steps.existing.outputs.reuse == 'false'
         env:
           BUILT_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
@@ -97,16 +121,18 @@ jobs:
           test "$pushed" = "$BUILT_DIGEST"
 
   image-index:
-    needs: image
+    needs: [validate, image]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      id-token: write
     outputs:
       digest: ${{ steps.index.outputs.digest }}
     env:
       IMAGE: ghcr.io/beyond10x/identity
       VERSION: ${{ github.ref_name }}
+      SOURCE_COMMIT: ${{ needs.validate.outputs.source-commit }}
     steps:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
@@ -114,24 +140,51 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
       - name: Publish the multi-platform version tag
         id: index
         run: |
-          if docker buildx imagetools inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
-            echo "::error::${IMAGE}:${VERSION} already exists; a released image is never rebuilt"
+          ref="${IMAGE}:${VERSION}"
+          if out=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' 2>&1); then
+            echo "::notice::${ref} exists; reusing it if it holds ${SOURCE_COMMIT}"
+          else
+            case "$out" in
+              *": not found"*) ;;
+              *) echo "::error::cannot read ${ref}: ${out}"; exit 1 ;;
+            esac
+            docker buildx imagetools create --tag "$ref" "${ref}-amd64" "${ref}-arm64"
+          fi
+          revisions=$(docker buildx imagetools inspect "$ref" --format '{{json .Image}}' \
+            | jq -c 'if has("config") then [.config.Labels["org.opencontainers.image.revision"]] else [.[] | .config.Labels["org.opencontainers.image.revision"]] end | unique')
+          if [ "$revisions" != "[\"${SOURCE_COMMIT}\"]" ]; then
+            echo "::error::${ref} carries revision ${revisions}, not ${SOURCE_COMMIT}; it is never replaced"
             exit 1
           fi
-          docker buildx imagetools create --tag "${IMAGE}:${VERSION}" \
-            "${IMAGE}:${VERSION}-amd64" "${IMAGE}:${VERSION}-arm64"
-          manifest=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest}}')
+          manifest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}')
           digest=$(jq -r .digest <<<"$manifest")
           grep -Eq '^sha256:[0-9a-f]{64}$' <<<"$digest"
           for platform in linux/amd64 linux/arm64; do
-            jq -e --arg p "$platform" \
+            if ! jq -e --arg p "$platform" \
               '[.manifests[] | select(.platform != null) | "\(.platform.os)/\(.platform.architecture)"] | index($p)' \
-              <<<"$manifest" >/dev/null
+              <<<"$manifest" >/dev/null; then
+              echo "::error::${ref} has no ${platform} image"
+              exit 1
+            fi
           done
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      - name: Sign the index and verify the signature
+        env:
+          DIGEST: ${{ steps.index.outputs.digest }}
+          ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          ref="${IMAGE}@${DIGEST}"
+          identity="https://github.com/${GITHUB_WORKFLOW_REF}"
+          if cosign verify --certificate-identity "$identity" --certificate-oidc-issuer "$ISSUER" "$ref" >/dev/null 2>&1; then
+            echo "::notice::${ref} is already signed by ${identity}"
+          else
+            cosign sign --yes "$ref"
+          fi
+          cosign verify --certificate-identity "$identity" --certificate-oidc-issuer "$ISSUER" "$ref" >/dev/null
 
   publish:
     needs: [validate, image-index]
@@ -165,6 +218,7 @@ jobs:
           private-key: ${{ secrets.B10X_BOT_PRIVATE_KEY }}
           owner: beyond10x
           repositories: identity
+          permission-contents: write
       - name: Publish the release with its manifest as the organization bot
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
