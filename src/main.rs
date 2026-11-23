@@ -203,10 +203,11 @@ fn upstream_providers() -> Result<Vec<UpstreamProvider>> {
         .filter(|value| !value.trim().is_empty());
     let Some(source) = source else {
         // A loopback development build signs people in itself, so a workstation may leave the
-        // upstream provider out entirely. Only a configuration that sets none of the
-        // single-provider variables counts as that; a partial one still fails on what it lacks.
+        // upstream provider out entirely. Only a configuration that sets none of the upstream
+        // variables counts as that: a partial one, or a registry that is present but blank, still
+        // fails on what it lacks.
         #[cfg(feature = "local-login")]
-        if no_single_upstream_variable_is_set() {
+        if no_upstream_variable_is_set() {
             return Ok(Vec::new());
         }
         return Ok(vec![UpstreamProvider {
@@ -265,8 +266,9 @@ fn upstream_providers() -> Result<Vec<UpstreamProvider>> {
 }
 
 #[cfg(feature = "local-login")]
-fn no_single_upstream_variable_is_set() -> bool {
+fn no_upstream_variable_is_set() -> bool {
     [
+        "IDENTITY_UPSTREAM_PROVIDERS_JSON",
         "IDENTITY_UPSTREAM_ISSUER",
         "IDENTITY_UPSTREAM_CLIENT_ID",
         "IDENTITY_UPSTREAM_CLIENT_SECRET",

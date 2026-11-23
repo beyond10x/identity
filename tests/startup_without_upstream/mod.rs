@@ -144,3 +144,24 @@ fn a_local_login_build_with_a_partial_upstream_still_names_the_missing_issuer() 
         "a half-configured upstream is refused, not silently dropped: {stderr}"
     );
 }
+
+/// A provider registry that is present but blank is a broken template, not an absent upstream.
+#[cfg(feature = "local-login")]
+#[test]
+fn a_local_login_build_with_a_blank_provider_registry_refuses_to_start() {
+    for blank in ["", "  "] {
+        let child = workstation("local-blank-providers", "127.0.0.1:0")
+            .env("IDENTITY_UPSTREAM_PROVIDERS_JSON", blank)
+            .spawn()
+            .unwrap();
+        let (code, stderr) = exit_with_stderr(child);
+        assert_eq!(
+            code, 1,
+            "IDENTITY_UPSTREAM_PROVIDERS_JSON={blank:?} must fail startup: {stderr}"
+        );
+        assert!(
+            stderr.contains("IDENTITY_UPSTREAM_ISSUER is required"),
+            "a blank registry falls back to the single-provider variables as it always did: {stderr}"
+        );
+    }
+}
