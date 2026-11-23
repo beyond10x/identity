@@ -1,4 +1,4 @@
-# identity
+# Identity
 
 The platform's login and principal service. It owns upstream OpenID Connect login, tenant-scoped
 principal identity, opaque CLI sessions, the server-side credential store, the organization
@@ -22,7 +22,10 @@ A consumer's registration decides what it holds:
 |---|---|---|
 | an in-cluster application registered as a session audience | the person's Identity session, presented with the exact audience in the `x-b10x-audience` header | `GET /v1/session-authority` |
 | a caller of the directory or profile routes | the person's Identity session, presented with the route's fixed audience | `/v1/directory/…`, `/v1/profile/…` |
-| a relying party registered as an access audience | a five-minute access credential for that one audience and scope set, never the session; an authenticated session mints it through `POST /v1/access-token`, and a public PKCE client receives it from `/oauth/authorize` with the exact `resource` | `GET /v1/access-authority` |
+| a relying party registered as an access audience | a five-minute access credential for that one audience and scope set, never the session | `GET /v1/access-authority` |
+
+An authenticated session mints that access credential through `POST /v1/access-token`, and a public
+PKCE client receives it from `/oauth/authorize` with the exact `resource`.
 
 Resolving a session returns the person's authority for that audience. It never mints a reusable
 token and never reaches another subject. A consumer's scope is a coarse gate only, so the consumer
@@ -45,18 +48,29 @@ crates are deployment components and are not published to crates.io.
 ## Build, test, run
 
 Main requires `bash scripts/gate.sh` green. It runs tests and clippy in both feature postures plus
-three component checks:
+four component checks:
 
-| step | command |
-|---|---|
-| tests (each test 60 s, the test run 120 s) | `timeout 600 cargo nextest run --workspace --locked` |
-| tests, dev-login posture | `timeout 600 cargo nextest run --workspace --locked --features local-login` |
-| lint | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
-| lint, dev-login posture | `cargo clippy --workspace --all-targets --locked --features local-login -- -D warnings` |
-| format | `cargo fmt --all --check` |
-| dev login cannot ship | `bash scripts/check-local-login-refused.sh` |
-| dependency advisories | `bash scripts/check-audit.sh` |
-| secrets | `bash scripts/check-secrets.sh` |
+```bash
+# tests (each test 60 s, the test run 120 s)
+timeout 600 cargo nextest run --workspace --locked
+# tests, dev-login posture
+timeout 600 cargo nextest run --workspace --locked --features local-login
+# lint
+cargo clippy --workspace --all-targets --locked -- -D warnings
+# lint, dev-login posture
+cargo clippy --workspace --all-targets --locked --features local-login \
+  -- -D warnings
+# format
+cargo fmt --all --check
+# dev login cannot ship
+bash scripts/check-local-login-refused.sh
+# docs source: the layout rules of UX round R-01, and their own test
+sh scripts/check-docs-source.sh
+# dependency advisories
+bash scripts/check-audit.sh
+# secrets
+bash scripts/check-secrets.sh
+```
 
 The former-brand fence is not a step here: it runs organization-wide as Atlas's
 `scripts/check-org-brand.sh`.
@@ -68,7 +82,8 @@ The PostgreSQL arm runs against a real server and reports itself skipped when
 `IDENTITY_TEST_POSTGRES_URL` is unset:
 
 ```bash
-IDENTITY_TEST_POSTGRES_URL='postgresql://user:password@host:5432/identity?sslmode=disable' \
+IDENTITY_TEST_POSTGRES_URL=\
+'postgresql://user:password@host:5432/identity?sslmode=disable' \
   cargo test --locked the_postgres_arm
 ```
 
@@ -91,8 +106,18 @@ IDENTITY_UPSTREAM_ISSUER=https://accounts.example.com \
 IDENTITY_UPSTREAM_CLIENT_ID='your-client-id' \
 IDENTITY_UPSTREAM_CLIENT_SECRET='your-client-secret' \
 IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM=organization \
-IDENTITY_ORGANIZATION_TENANTS_JSON='[{"claimValue":"example.com","tenantId":"local"}]' \
-IDENTITY_AUDIENCE_REGISTRY_JSON='{"version":"identity.audiences/2","session":["urn:example:console"],"access":[{"audience":"urn:example:resource-api","scopes":["resource.read"],"groupScopes":[{"group":"operator","scopes":["resource.write"]}]}]}' \
+IDENTITY_ORGANIZATION_TENANTS_JSON='[
+  {"claimValue": "example.com", "tenantId": "local"}
+]' \
+IDENTITY_AUDIENCE_REGISTRY_JSON='{
+  "version": "identity.audiences/2",
+  "session": ["urn:example:console"],
+  "access": [{
+    "audience": "urn:example:resource-api",
+    "scopes": ["resource.read"],
+    "groupScopes": [{"group": "operator", "scopes": ["resource.write"]}]
+  }]
+}' \
 IDENTITY_DATABASE_PATH=/tmp/identity/private/identity.sqlite3 \
 cargo run --locked
 ```
@@ -109,7 +134,15 @@ deployment with several providers instead supplies a credential-free registry wh
 `clientSecretEnv` entries name separately injected environment variables:
 
 ```bash
-IDENTITY_UPSTREAM_PROVIDERS_JSON='[{"id":"one","label":"Provider one","issuer":"https://accounts.example.com","clientId":"client-one","clientSecretEnv":"IDENTITY_PROVIDER_ONE_SECRET","organizationDomainClaim":"organization","organizationTenants":[{"claimValue":"example.com","tenantId":"local"}]}]'
+IDENTITY_UPSTREAM_PROVIDERS_JSON='[{
+  "id": "one",
+  "label": "Provider one",
+  "issuer": "https://accounts.example.com",
+  "clientId": "client-one",
+  "clientSecretEnv": "IDENTITY_PROVIDER_ONE_SECRET",
+  "organizationDomainClaim": "organization",
+  "organizationTenants": [{"claimValue": "example.com", "tenantId": "local"}]
+}]'
 ```
 
 The authorization request selects a provider through its `identity_provider` parameter. When more
@@ -126,8 +159,17 @@ The exchange is disabled by default. A caller declaration holds only the name of
 variable, and the secret is injected separately from deployment-owned secret material:
 
 ```bash
-IDENTITY_TRUSTED_ACCESS_CALLERS_JSON='[{"id":"relying-service","secretEnv":"IDENTITY_RELYING_SERVICE_EXCHANGE_SECRET"}]'
-IDENTITY_ACCESS_EXCHANGE_POLICIES_JSON='[{"callerId":"relying-service","sourceAudience":"urn:example:published-resource","requiredSourceScopes":["published.call"],"targetAudience":"urn:example:resource-api","allowedTargetScopes":["resource.read"]}]'
+IDENTITY_TRUSTED_ACCESS_CALLERS_JSON='[{
+  "id": "relying-service",
+  "secretEnv": "IDENTITY_RELYING_SERVICE_EXCHANGE_SECRET"
+}]'
+IDENTITY_ACCESS_EXCHANGE_POLICIES_JSON='[{
+  "callerId": "relying-service",
+  "sourceAudience": "urn:example:published-resource",
+  "requiredSourceScopes": ["published.call"],
+  "targetAudience": "urn:example:resource-api",
+  "allowedTargetScopes": ["resource.read"]
+}]'
 ```
 
 `POST /v1/access-exchange` requires the source access token in `Authorization` and the confidential
@@ -155,7 +197,13 @@ build still requires `IDENTITY_UPSTREAM_ISSUER`.
 IDENTITY_LISTEN=127.0.0.1:8080 \
 IDENTITY_PUBLIC_ORIGIN=http://127.0.0.1:8080 \
 IDENTITY_TENANT_ID=local \
-IDENTITY_AUDIENCE_REGISTRY_JSON='{"version":"identity.audiences/2","session":["urn:example:console"],"access":[{"audience":"urn:example:resource-api","scopes":["resource.read"]}]}' \
+IDENTITY_AUDIENCE_REGISTRY_JSON='{
+  "version": "identity.audiences/2",
+  "session": ["urn:example:console"],
+  "access": [
+    {"audience": "urn:example:resource-api", "scopes": ["resource.read"]}
+  ]
+}' \
 IDENTITY_DATABASE_PATH="$PWD/target/identity-local/identity.sqlite3" \
 cargo run --locked --features local-login
 ```
@@ -166,11 +214,14 @@ build. The provider then serves only identity links, because `/oauth/authorize` 
 Issuing a session for a mailbox somebody typed authenticates nobody. Three independent rules refuse
 it in a deployment, and any one of them is sufficient:
 
-| rule | enforced by |
-|---|---|
-| the release profile refuses to compile it | `src/lib.rs` raises `compile_error!` when the feature is combined with `debug_assertions` off, and again whenever the profile optimizes, through the `optimized_build` cfg that `build.rs` derives from `OPT_LEVEL` |
-| the image selects no feature | `Dockerfile` runs `cargo build --locked --release` with no `--features` |
-| a feature build refuses a reachable address | the process exits before binding unless it both listens on a loopback address and publishes a loopback HTTP origin; the request path checks the same predicate again |
+- **The release profile refuses to compile it.** `src/lib.rs` raises `compile_error!` when the
+  feature is combined with `debug_assertions` off, and again whenever the profile optimizes, through
+  the `optimized_build` cfg that `build.rs` derives from `OPT_LEVEL`.
+- **The image selects no feature.** `Dockerfile` runs `cargo build --locked --release` with no
+  `--features`.
+- **A feature build refuses a reachable address.** The process exits before binding unless it both
+  listens on a loopback address and publishes a loopback HTTP origin; the request path checks the
+  same predicate again.
 
 So `RUSTFLAGS='-C debug-assertions=yes' cargo build --release` cannot include the route.
 `scripts/check-local-login-refused.sh` proves the first two rules.
@@ -187,9 +238,12 @@ Required:
 | variable | format |
 |---|---|
 | `IDENTITY_PUBLIC_ORIGIN` | the issuer: an absolute `https` origin without path, query or fragment; `http` only for host `127.0.0.1` |
-| `IDENTITY_TENANT_ID` | the tenant of a login whose provider uses a single-tenant compatibility mode (no organization claim, or the base-domain allowlist); never used under an exact mapping, see [the rules](#the-rules-that-shape-the-code) |
+| `IDENTITY_TENANT_ID` | the tenant of a login whose provider uses a single-tenant compatibility mode (no organization claim, or the base-domain allowlist) |
 | `IDENTITY_AUDIENCE_REGISTRY_JSON` | the `identity.audiences/2` document in [Audiences](#audiences); no default |
-| upstream provider | `IDENTITY_UPSTREAM_PROVIDERS_JSON`, a non-empty array as in [Running it locally](#running-it-locally) whose every `clientSecretEnv` names a set variable; or else all three of `IDENTITY_UPSTREAM_ISSUER` (an `https` URL without query or fragment), `IDENTITY_UPSTREAM_CLIENT_ID`, `IDENTITY_UPSTREAM_CLIENT_SECRET` |
+| upstream provider | `IDENTITY_UPSTREAM_PROVIDERS_JSON`, a non-empty array as in [Running it locally](#running-it-locally) whose every `clientSecretEnv` names a set variable |
+| or else, all three of | `IDENTITY_UPSTREAM_ISSUER` (an `https` URL without query or fragment), `IDENTITY_UPSTREAM_CLIENT_ID`, `IDENTITY_UPSTREAM_CLIENT_SECRET` |
+
+`IDENTITY_TENANT_ID` is never used under an exact mapping, see [the rules](#the-rules-that-shape-the-code).
 
 Durable state is SQLite unless a PostgreSQL variable is set:
 
@@ -197,7 +251,8 @@ Durable state is SQLite unless a PostgreSQL variable is set:
 |---|---|
 | `IDENTITY_DATABASE_PATH` | `/var/lib/identity/identity.sqlite3`; the SQLite file |
 | `IDENTITY_DATABASE_URL` | a `postgres://` or `postgresql://` URL; selects PostgreSQL |
-| `IDENTITY_DB_USER`, `IDENTITY_DB_PASSWORD`, `IDENTITY_DB_HOST`, `IDENTITY_DB_PORT`, `IDENTITY_DB_NAME` | the same URL in parts; once any `IDENTITY_DB_*` is set all five are required; `IDENTITY_DB_PARAMS` defaults to `sslmode=require`; refused together with `IDENTITY_DATABASE_URL` |
+| `IDENTITY_DB_USER`, `IDENTITY_DB_PASSWORD`, `IDENTITY_DB_HOST`, `IDENTITY_DB_PORT`, `IDENTITY_DB_NAME` | the same URL in parts; once any `IDENTITY_DB_*` is set all five are required; refused together with `IDENTITY_DATABASE_URL` |
+| `IDENTITY_DB_PARAMS` | `sslmode=require` |
 
 Optional:
 
@@ -207,7 +262,7 @@ Optional:
 | `IDENTITY_CLI_CLIENT_ID` | `identity-cli`; the public client whose redirect may be any loopback port |
 | `IDENTITY_WEB_CLIENTS_JSON` | `[]`; `[{"clientId":"…","redirectUri":"…"}]`, further public clients, each bound to one exact redirect URI |
 | `IDENTITY_STATIC_GROUP_MEMBERSHIPS_JSON` | `[]`; `[{"tenantId":"…","email":"…","groups":["…"]}]`, groups per person; `identity-directory-admin` grants directory writes |
-| `IDENTITY_DEFAULT_TENANT_GROUPS_JSON` | `[]`; `[{"tenantId":"…","groups":["…"]}]`, groups for every verified member of the tenant; with the row above, the only groups an authority response carries |
+| `IDENTITY_DEFAULT_TENANT_GROUPS_JSON` | `[]`; `[{"tenantId":"…","groups":["…"]}]`, groups for every verified member of the tenant |
 | `IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM` | unset; the single-provider organization claim, set together with exactly one of the next two |
 | `IDENTITY_ORGANIZATION_TENANTS_JSON` | unset; `[{"claimValue":"…","tenantId":"…"}]`, exact claim-to-tenant mapping |
 | `IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS` | unset; comma-separated base domains, the legacy single-tenant allowlist matched by dotted suffix |
@@ -215,30 +270,44 @@ Optional:
 | `IDENTITY_TRUSTED_ACCESS_CALLERS_JSON`, `IDENTITY_ACCESS_EXCHANGE_POLICIES_JSON` | `[]`; see [Running it locally](#running-it-locally) |
 | `RUST_LOG` | `info` |
 
+The groups in `IDENTITY_STATIC_GROUP_MEMBERSHIPS_JSON` and `IDENTITY_DEFAULT_TENANT_GROUPS_JSON` are
+the only groups an authority response carries.
+
 Constraints ([`AGENTS.md`](AGENTS.md) invariant 7 and the safety envelope):
 
-| constraint | rule |
-|---|---|
-| one replica, replacement rollouts | Applies on either backend. Capacity check-and-insert admission is serialized inside one process. A second process, including the overlap of a rolling update, is not proven safe. |
-| SQLite directory | A non-symlink directory owned by the process user with no group or other permission bit (`0700` or stricter). Identity creates it at `0700` when it is missing. A volume that grants group access is refused. |
-| SQLite file | An existing database must be a non-symlink regular file owned by the same user with no permission beyond `0600`. Identity sets it to `0600` on every start. |
-| configuration changes end sessions | The issuer, tenant, CLI client, providers with their organization policy, web clients, audience registry and access-exchange policies form the session configuration generation. Changing any of them requires every person to log in again. Group assignments and secrets are not part of it. |
+- **One replica, replacement rollouts.** Applies on either backend. Capacity check-and-insert
+  admission is serialized inside one process. A second process, including the overlap of a rolling
+  update, is not proven safe.
+- **SQLite directory.** A non-symlink directory owned by the process user with no group or other
+  permission bit (`0700` or stricter). Identity creates it at `0700` when it is missing. A volume
+  that grants group access is refused.
+- **SQLite file.** An existing database must be a non-symlink regular file owned by the same user
+  with no permission beyond `0600`. Identity sets it to `0600` on every start.
+- **Configuration changes end sessions.** The issuer, tenant, CLI client, providers with their
+  organization policy, web clients, audience registry and access-exchange policies form the session
+  configuration generation. Changing any of them requires every person to log in again. Group
+  assignments and secrets are not part of it.
 
 ## Routes
 
 | route | for |
 |---|---|
 | `GET /livez` | process liveness only |
-| `GET /readyz`, `GET /healthz` | executes a database query; `503` when durable state is unavailable |
+| `GET /readyz` | executes a database query; `503` when durable state is unavailable |
+| `GET /healthz` | the same as `GET /readyz` |
 | `GET /.well-known/identity-cli-login` | Identity-only login and access-token endpoint metadata |
 | `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata for public PKCE clients |
-| `GET /oauth/authorize`, `GET /oauth/callback/upstream`, `POST /oauth/token` | the browser leg and the one-use code exchange; a registered RFC 8707 resource yields its short-lived access token directly |
+| `GET /oauth/authorize` | the browser leg, with `GET /oauth/callback/upstream` |
+| `GET /oauth/callback/upstream` | the browser leg, with `GET /oauth/authorize` |
+| `POST /oauth/token` | the one-use code exchange; a registered RFC 8707 resource yields its short-lived access token directly |
 | `GET /v1/session-authority` | an allowlisted in-cluster caller resolves the current session |
-| `POST /v1/access-token`, `GET /v1/access-authority` | mint and resolve a five-minute audience-scoped access token |
+| `POST /v1/access-token` | mint a five-minute audience-scoped access token |
+| `GET /v1/access-authority` | resolve a five-minute audience-scoped access token |
 | `POST /v1/access-exchange` | confidentially narrow one live human access token into an exact deployment-admitted target audience and scope set |
 | `POST /v1/logout` | revokes the session and every outstanding access token for that tenant and subject |
 | `GET /v1/identity-links` | lists the current person's explicitly linked upstream identities |
-| `POST`, `DELETE /v1/identity-links/{provider_id}` | starts an authenticated link flow or removes a non-final link |
+| `POST /v1/identity-links/{provider_id}` | starts an authenticated link flow |
+| `DELETE /v1/identity-links/{provider_id}` | removes a non-final link |
 | `/v1/directory/…` | memberships and groups |
 | `/v1/profile/…` | the personal collaboration profile |
 
@@ -257,7 +326,10 @@ shows. The fixed audiences are:
 |---|---|
 | `urn:b10x:directory` | every `/v1/directory/…` route, in `x-b10x-audience` |
 | `urn:b10x:profile` | the person's own control surface |
-| `urn:b10x:profile-projection` | the learning consumer: it reaches the projection and the learning write, and nothing else. The durable store, the withheld statements and the lifecycle controls are not addressable under it |
+| `urn:b10x:profile-projection` | the learning consumer: it reaches the projection and the learning write, and nothing else |
+
+Under `urn:b10x:profile-projection` the durable store, the withheld statements and the lifecycle
+controls are not addressable.
 
 The registry document is closed and deterministic:
 
@@ -314,6 +386,8 @@ are not paginated.
 
 ## The rules that shape the code
 
+### Invariants and design rules
+
 The full statements are in [`AGENTS.md`](AGENTS.md).
 
 Tenant is resolved from a cryptographically verified upstream claim, before any code or session
@@ -331,15 +405,24 @@ Modes 2 and 3 are single-tenant compatibility modes. Unknown, duplicate, non-str
 claims fail closed. See
 [the tenant-resolution decision](docs/decisions/0001-verified-organization-tenant-resolution.md).
 
-| rule | statement |
-|---|---|
-| nothing reusable is stored in the clear | Authorization codes, sessions and access tokens are stored only as SHA-256 verifiers. Provider access and refresh tokens are never persisted. |
-| sessions are bound to issuer, tenant and configuration generation | Changing the authority-defining configuration requires a new login. |
-| a directory group carries no authority | Only the deployment-configured static group assignments reach an authority response. Adding a principal to a directory group grants nothing. Directory writes require the static group `identity-directory-admin`, so administration is deployment configuration and can never be granted from inside the directory. |
-| groups are flat and membership is direct | One bounded indexed query, with no recursion and no transitive closure. Hierarchy belongs to the collaboration product. |
-| an inference does not become a confirmation by itself | The profile learning path admits only `observed` and `inferred`. The only transition into `confirmed` is an explicit act by the person. |
-| secret material never enters a profile projection | Content and source references are screened for credential markers, vendor prefixes, JWT shape, URL user info and long opaque tokens, on write and again when a snapshot is built. A row that arrived by another route therefore still cannot reach a model. |
-| schema changes are additive only | Every statement is `CREATE … IF NOT EXISTS`. An older binary keeps working against a newer schema. |
+- **Nothing reusable is stored in the clear.** Authorization codes, sessions and access tokens are
+  stored only as SHA-256 verifiers. Provider access and refresh tokens are never persisted.
+- **Sessions are bound to issuer, tenant and configuration generation.** Changing the
+  authority-defining configuration requires a new login.
+- **A directory group carries no authority.** Only the deployment-configured static group
+  assignments reach an authority response. Adding a principal to a directory group grants nothing.
+  Directory writes require the static group `identity-directory-admin`, so administration is
+  deployment configuration and can never be granted from inside the directory.
+- **Groups are flat and membership is direct.** One bounded indexed query, with no recursion and no
+  transitive closure. Hierarchy belongs to the collaboration product.
+- **An inference does not become a confirmation by itself.** The profile learning path admits only
+  `observed` and `inferred`. The only transition into `confirmed` is an explicit act by the person.
+- **Secret material never enters a profile projection.** Content and source references are screened
+  for credential markers, vendor prefixes, JWT shape, URL user info and long opaque tokens, on write
+  and again when a snapshot is built. A row that arrived by another route therefore still cannot
+  reach a model.
+- **Schema changes are additive only.** Every statement is `CREATE … IF NOT EXISTS`. An older binary
+  keeps working against a newer schema.
 
 ## Layout
 
