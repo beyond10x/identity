@@ -1459,23 +1459,35 @@ pub(crate) async fn correct_statement(
     previous.resolved_at = Some(now);
     previous.updated_at = now;
     previous.superseded_by = Some(corrected.statement_id.clone());
-    if !supersede_statement(&state.store, &owner.tenant_id, &owner.subject, &previous)
+    link_correction(&state, &owner, &previous).await?;
+    durable_response(&state, &owner).await
+}
+
+/// Links an original to the replacement `previous.superseded_by` names, which is already stored.
+/// When the original was superseded by another correction in the meantime (409) or forgotten
+/// (404), the replacement is removed again, so at most one current revision exists.
+///
+/// The insert, this write, and the clean-up are separate statements, not one transaction: the
+/// clustered store shares one client across requests, so a transaction on it would take in the
+/// statements of concurrent requests. Between them a reader can see the replacement for a moment.
+async fn link_correction(
+    state: &AppState,
+    owner: &ProfileSubject,
+    previous: &StatementRecord,
+) -> Result<(), HttpError> {
+    if supersede_statement(&state.store, &owner.tenant_id, &owner.subject, previous)
         .await
         .map_err(HttpError::internal)?
     {
-        // Another correction superseded the original between the read and this write, or the
-        // original was forgotten. Remove this replacement so at most one current revision exists.
-        erase_statement(
-            &state.store,
-            &owner.tenant_id,
-            &owner.subject,
-            &corrected.statement_id,
-        )
-        .await
-        .map_err(HttpError::internal)?;
-        return Err(stale_revision());
+        return Ok(());
     }
-    durable_response(&state, &owner).await
+    if let Some(replacement) = previous.superseded_by.as_deref() {
+        erase_statement(&state.store, &owner.tenant_id, &owner.subject, replacement)
+            .await
+            .map_err(HttpError::internal)?;
+    }
+    own_statement(state, owner, &previous.statement_id).await?;
+    Err(stale_revision())
 }
 
 /// A correction names the revision it replaces. One that names a revision already replaced is
@@ -2324,6 +2336,50 @@ mod tests {
         assert_eq!(
             times(read_consent(&store, TENANT, "exclusions").await.unwrap()),
             (true, Some(700), None)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_correction_of_a_forgotten_original_is_missing_not_stale() {
+        let state = app_state(Store::in_memory().unwrap());
+        let owner = super::ProfileSubject {
+            tenant_id: TENANT.to_owned(),
+            subject: SUBJECT.to_owned(),
+        };
+        let mut original = statement(
+            "kkkkkkkkkkkkkkkkkkkkkk",
+            "observed",
+            "prefers calls",
+            "conversation:thread-5",
+        );
+        let replacement = statement(
+            "llllllllllllllllllllll",
+            CONFIRMED_STATE,
+            "prefers written briefs",
+            "person:self",
+        );
+        write_statement(&state.store, TENANT, SUBJECT, &original)
+            .await
+            .unwrap();
+        write_statement(&state.store, TENANT, SUBJECT, &replacement)
+            .await
+            .unwrap();
+        // The person forgets the original while the correction is in flight.
+        erase_statement(&state.store, TENANT, SUBJECT, &original.statement_id)
+            .await
+            .unwrap();
+        "revoked".clone_into(&mut original.epistemic_state);
+        original.superseded_by = Some(replacement.statement_id.clone());
+        let refusal = super::link_correction(&state, &owner, &original)
+            .await
+            .expect_err("a forgotten original cannot be linked");
+        assert_eq!(refusal.status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            read_statements(&state.store, TENANT, SUBJECT)
+                .await
+                .unwrap(),
+            Vec::new(),
+            "the replacement is removed with the refusal"
         );
     }
 
