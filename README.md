@@ -40,8 +40,8 @@ remain deployment components and are not published to crates.io.
 | access tokens and access authority | implemented |
 | organization directory and groups | implemented |
 | personal collaboration profile | implemented |
-| PostgreSQL backend | implemented; **distributed admission is not proven**, so the dev composition fixes one replica and uses replacement rollouts |
-| deployment composition | lives in the platform's cloud umbrella chart, not in this repo |
+| PostgreSQL backend | implemented; **distributed admission is not proven**, so a deployment runs one replica with replacement rollouts |
+| deployment composition | no maintained chart or manifest; the image and the runtime configuration in [Deploying](#deploying) are the contract |
 
 ## Build, test, run
 
@@ -163,6 +163,63 @@ refuse it in a deployment, and any one of them is sufficient**:
   the same predicate again.
 
 `scripts/check-local-login-refused.sh` proves the first two.
+
+## Deploying
+
+This repository ships no chart or manifest. `Dockerfile` builds the image: distroless, the
+`nonroot` user, port 8080, volume `/var/lib/identity`. Startup validates the whole environment
+below, fetches every upstream provider's OIDC discovery document, opens the store, and only then
+binds the listener; any failure exits non-zero.
+
+Required:
+
+| variable | format |
+|---|---|
+| `IDENTITY_PUBLIC_ORIGIN` | the issuer: an absolute `https` origin without path, query or fragment; `http` only for host `127.0.0.1` |
+| `IDENTITY_TENANT_ID` | the tenant of a login whose provider has no exact organization mapping (no organization policy, or a base-domain policy) |
+| `IDENTITY_AUDIENCE_REGISTRY_JSON` | the `identity.audiences/2` document in [Audiences](#audiences); no default |
+| upstream provider | `IDENTITY_UPSTREAM_PROVIDERS_JSON`, a non-empty array as in [Running it locally](#running-it-locally) whose every `clientSecretEnv` names a set variable; or else all three of `IDENTITY_UPSTREAM_ISSUER` (an `https` URL without query or fragment), `IDENTITY_UPSTREAM_CLIENT_ID`, `IDENTITY_UPSTREAM_CLIENT_SECRET` |
+
+Durable state is SQLite unless a PostgreSQL variable is set:
+
+| variable | default and format |
+|---|---|
+| `IDENTITY_DATABASE_PATH` | `/var/lib/identity/identity.sqlite3`; the SQLite file |
+| `IDENTITY_DATABASE_URL` | a `postgres://` or `postgresql://` URL; selects PostgreSQL |
+| `IDENTITY_DB_USER`, `IDENTITY_DB_PASSWORD`, `IDENTITY_DB_HOST`, `IDENTITY_DB_PORT`, `IDENTITY_DB_NAME` | the same URL in parts; once any `IDENTITY_DB_*` is set all five are required; `IDENTITY_DB_PARAMS` defaults to `sslmode=require`; refused together with `IDENTITY_DATABASE_URL` |
+
+Optional:
+
+| variable | default and format |
+|---|---|
+| `IDENTITY_LISTEN` | `0.0.0.0:8080` |
+| `IDENTITY_CLI_CLIENT_ID` | `identity-cli`; the public client whose redirect may be any loopback port |
+| `IDENTITY_WEB_CLIENTS_JSON` | `[]`; `[{"clientId":"…","redirectUri":"…"}]`, further public clients, each bound to one exact redirect URI |
+| `IDENTITY_STATIC_GROUP_MEMBERSHIPS_JSON` | `[]`; `[{"tenantId":"…","email":"…","groups":["…"]}]`, groups per person; `identity-directory-admin` grants directory writes |
+| `IDENTITY_DEFAULT_TENANT_GROUPS_JSON` | `[]`; `[{"tenantId":"…","groups":["…"]}]`, groups for every verified member of the tenant; with the row above, the only groups an authority response carries |
+| `IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM` | unset; the single-provider organization claim, set together with exactly one of the next two |
+| `IDENTITY_ORGANIZATION_TENANTS_JSON` | unset; `[{"claimValue":"…","tenantId":"…"}]`, exact claim-to-tenant mapping |
+| `IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS` | unset; comma-separated base domains |
+| `IDENTITY_UPSTREAM_CA_BUNDLE` | unset; see [Running it locally](#running-it-locally) |
+| `IDENTITY_TRUSTED_ACCESS_CALLERS_JSON`, `IDENTITY_ACCESS_EXCHANGE_POLICIES_JSON` | `[]`; see [Running it locally](#running-it-locally) |
+| `RUST_LOG` | `info` |
+
+Constraints ([`AGENTS.md`](AGENTS.md) invariant 7 and the safety envelope):
+
+- **One replica, replacement rollouts**, on either backend. Capacity check-and-insert admission is
+  serialized inside one process; a second process, including the overlap of a rolling update, is
+  not proven safe.
+- **The SQLite directory** must be a non-symlink directory owned by the process user with no group
+  or other permission bit (`0700` or stricter); Identity creates it at `0700` when it is missing.
+  An existing database must be a non-symlink regular file owned by the same user with no permission
+  beyond `0600`; Identity sets it to `0600` on every start. A volume that grants group access is
+  refused.
+- **Probes:** `GET /livez` for liveness, `GET /readyz` for readiness (`503` while the store is
+  unavailable).
+- **Configuration changes end sessions.** The issuer, tenant, CLI client, providers with their
+  organization policy, web clients, audience registry and access-exchange policies form the session
+  configuration generation; changing any of them requires every person to log in again. Group
+  assignments and secrets are not part of it.
 
 ## Routes
 
