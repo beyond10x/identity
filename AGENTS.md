@@ -89,8 +89,8 @@ its own evidence.
   service-user-owned directory at mode `0700` or stricter, and the database itself is forced to
   `0600`. Never relax either check to make a local run easier.
 - **Revocation is total.** `POST /v1/logout` revokes the presented session **and every outstanding
-  relying-party access token for that subject**. A partial revocation leaves a live credential
-  behind.
+  relying-party access token for that tenant and subject**. A partial revocation leaves a live
+  credential behind.
 - **Relying-party registration is opaque.** Identity may validate and bind configured audience and
   scope bytes, but it contains no downstream endpoint, provider flow, product name, capability
   vocabulary, or product-specific policy branch. The relying party owns scope meaning and the final

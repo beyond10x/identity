@@ -247,7 +247,7 @@ Constraints ([`AGENTS.md`](AGENTS.md) invariant 7 and the safety envelope):
 | `GET /v1/session-authority` | an allowlisted in-cluster caller resolves the current session |
 | `POST /v1/access-token`, `GET /v1/access-authority` | mint and resolve a five-minute audience-scoped access token |
 | `POST /v1/access-exchange` | confidentially narrow one live human access token into an exact deployment-admitted target audience and scope set |
-| `POST /v1/logout` | revokes the session and every outstanding access token for that subject |
+| `POST /v1/logout` | revokes the session and every outstanding access token for that tenant and subject |
 | `GET /v1/identity-links` | lists the current person's explicitly linked upstream identities |
 | `POST`, `DELETE /v1/identity-links/{provider_id}` | starts an authenticated link flow or removes a non-final link |
 | `/v1/directory/…` | memberships and groups |
