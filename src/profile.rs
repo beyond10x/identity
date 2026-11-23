@@ -853,6 +853,55 @@ pub(crate) async fn read_statements(
     }
 }
 
+/// Every statement retained for this person from one source, whatever its state.
+pub(crate) async fn read_statements_from_source(
+    store: &Store,
+    tenant_id: &str,
+    subject: &str,
+    source_reference: &str,
+) -> Result<Vec<StatementRecord>> {
+    match store {
+        Store::Sqlite(_) => {
+            let connection = store.sqlite_connection()?;
+            let mut statement = connection.prepare(&format!(
+                "SELECT {STATEMENT_COLUMNS} FROM profile_statements
+                 WHERE tenant_id = ?1 AND subject = ?2 AND source_reference = ?3
+                 ORDER BY statement_id LIMIT ?4"
+            ))?;
+            let rows = statement.query_map(
+                params![
+                    tenant_id,
+                    subject,
+                    source_reference,
+                    MAX_STATEMENTS_PER_SUBJECT
+                ],
+                statement_from_sqlite_row,
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(Into::into)
+        }
+        Store::Postgres(postgres) => postgres
+            .client()
+            .await?
+            .query(
+                &format!(
+                    "SELECT {STATEMENT_COLUMNS} FROM profile_statements
+                     WHERE tenant_id = $1 AND subject = $2 AND source_reference = $3
+                     ORDER BY statement_id LIMIT $4"
+                ),
+                &[
+                    &tenant_id,
+                    &subject,
+                    &source_reference,
+                    &MAX_STATEMENTS_PER_SUBJECT,
+                ],
+            )
+            .await
+            .map(|rows| rows.iter().map(statement_from_postgres_row).collect())
+            .map_err(Into::into),
+    }
+}
+
 pub(crate) async fn write_statement_state(
     store: &Store,
     tenant_id: &str,
@@ -1176,9 +1225,53 @@ pub(crate) async fn create_statement(
         resolved_at: None,
         superseded_by: None,
     };
-    persist_new_statement(&state, &owner, &record).await?;
+    {
+        let _admission = admit_new_statement(&state, &owner).await?;
+        // A repeat delivery of something already retained from the same source adds nothing. In
+        // particular it must not bring back what the person withdrew: the withdrawn row stays
+        // the one record of that observation.
+        if repeat_delivery(&state.store, &owner, &record)
+            .await
+            .map_err(HttpError::internal)?
+            .is_none()
+        {
+            write_statement(&state.store, &owner.tenant_id, &owner.subject, &record)
+                .await
+                .map_err(HttpError::internal)?;
+        }
+    }
     // A learning consumer receives the projection it is allowed to see, never the durable store.
     projection_response(&state, &owner).await
+}
+
+/// The form of a statement's content that identifies a delivery: whitespace runs collapsed and
+/// letters lowercased, so a redelivery that differs only in spacing or case is the same one.
+fn delivery_content(content: &str) -> String {
+    content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// The statement already retained for this person from the same source with the same content,
+/// whatever its state. Source plus normalised content is the stable key of a delivery; the row
+/// it finds is the one every lifecycle decision about that observation was recorded on.
+async fn repeat_delivery(
+    store: &Store,
+    owner: &ProfileSubject,
+    record: &StatementRecord,
+) -> Result<Option<StatementRecord>> {
+    let content = delivery_content(&record.content);
+    Ok(read_statements_from_source(
+        store,
+        &owner.tenant_id,
+        &owner.subject,
+        &record.source_reference,
+    )
+    .await?
+    .into_iter()
+    .find(|retained| delivery_content(&retained.content) == content))
 }
 
 fn new_statement_id() -> Result<String, HttpError> {
@@ -1193,7 +1286,19 @@ async fn persist_new_statement(
     owner: &ProfileSubject,
     record: &StatementRecord,
 ) -> Result<(), HttpError> {
-    let _admission = state
+    let _admission = admit_new_statement(state, owner).await?;
+    write_statement(&state.store, &owner.tenant_id, &owner.subject, record)
+        .await
+        .map_err(HttpError::internal)
+}
+
+/// Refuses a new statement past either row cap and returns the admission guard the insert runs
+/// under.
+async fn admit_new_statement<'a>(
+    state: &'a AppState,
+    owner: &ProfileSubject,
+) -> Result<Option<tokio::sync::MutexGuard<'a, ()>>, HttpError> {
+    state
         .store
         .enforce_row_caps(&[
             RowCap {
@@ -1214,10 +1319,7 @@ async fn persist_new_statement(
                 label: "profile statements",
             },
         ])
-        .await?;
-    write_statement(&state.store, &owner.tenant_id, &owner.subject, record)
         .await
-        .map_err(HttpError::internal)
 }
 
 async fn own_statement(
@@ -2046,6 +2148,56 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_observation_stays_withdrawn_when_it_is_delivered_again() {
+        let state = app_state(Store::in_memory().unwrap());
+        let person = signed_in(&state, super::PROFILE_AUDIENCE).await;
+        grant_learning(&state, &person).await;
+        let learned = learn(&state, &person, "reviews in the afternoon", "thread-8").await;
+        let observed = learned["statements"][0]["statement_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        super::revoke_statement(
+            axum::extract::State(state.clone()),
+            person.clone(),
+            axum::extract::Path(observed.clone()),
+            axum::Json(super::RevocationRequest {
+                epistemic_state: "rejected".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        for redelivery in ["reviews in the afternoon", "  Reviews  in the AFTERNOON "] {
+            let snapshot = learn(&state, &person, redelivery, "thread-8").await;
+            assert_eq!(
+                snapshot["statement_count"], 0,
+                "a redelivered withdrawn observation must not re-enter the projection"
+            );
+        }
+        let retained = read_statements(&state.store, TENANT, SUBJECT)
+            .await
+            .unwrap();
+        assert_eq!(retained.len(), 1, "a repeat delivery adds no row");
+        assert_eq!(retained[0].statement_id, observed);
+        assert_eq!(retained[0].epistemic_state, "rejected");
+
+        // The same content from a different source is a different observation.
+        let snapshot = learn(&state, &person, "reviews in the afternoon", "thread-9").await;
+        assert_eq!(snapshot["statement_count"], 1);
+        // An active observation delivered again is not duplicated either.
+        let snapshot = learn(&state, &person, "reviews in the afternoon", "thread-9").await;
+        assert_eq!(snapshot["statement_count"], 1);
+        assert_eq!(
+            read_statements(&state.store, TENANT, SUBJECT)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]

@@ -4929,7 +4929,7 @@ mod tests {
         assert!(store.enforce_row_caps(&[cap()]).await.unwrap().is_some());
     }
 
-    /// The clustered arm of the conditional supersede.
+    /// The clustered arm of the conditional supersede and the per-source read.
     async fn exercise_postgres_profile_history(
         store: &Store,
         tenant: &str,
@@ -4941,6 +4941,19 @@ mod tests {
         profile::write_statement(store, tenant, subject, record)
             .await
             .unwrap();
+        assert_eq!(
+            profile::read_statements_from_source(store, tenant, subject, "conversation:thread-1")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            profile::read_statements_from_source(store, tenant, subject, "conversation:thread-2")
+                .await
+                .unwrap(),
+            Vec::new()
+        );
         record.epistemic_state = "revoked".to_owned();
         record.superseded_by = Some("identity_profile_statement_v1_first".to_owned());
         assert!(
