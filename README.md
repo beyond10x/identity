@@ -5,8 +5,8 @@ principal identity, opaque CLI sessions, the server-side credential store, the o
 directory, and the personal collaboration profile.
 
 Without it, every product service runs its own upstream OAuth, keeps its own copy of who works
-here and defines what a user identifier means. Upstream provider tokens never leave this process and
-never reach a consumer. A user key is always `(tenant, sub)` and never a bare subject. Every consumer
+here and defines what a user identifier means. Upstream provider tokens never leave this process, and upstream
+provider credentials never reach a consumer. A user key is always `(tenant, sub)` and never a bare subject. Every consumer
 resolves an authority bound to one exact registered audience.
 
 ## Where it sits
