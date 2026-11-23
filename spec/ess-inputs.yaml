@@ -1,0 +1,11 @@
+format: ess-inputs/2
+requires: ess 0.97
+specification:
+  - system.yaml
+  - components.yaml
+  - domains/errors.yaml
+  - domains/login.yaml
+  - domains/credentials.yaml
+  - domains/directory.yaml
+  - domains/profile.yaml
+scenarios: []

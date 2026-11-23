@@ -1,0 +1,20 @@
+# Retrofitted from the code at origin/fix/profile-revisions plus PR 25 and PR 22, with PR 21
+# (origin/fix/directory-cap) and PR 23 (origin/fix/local-login-offline) read as landed.
+# It describes what Identity does today; every declaration cites its source.
+# Identity has no OpenAPI document; the sources are src/*.rs, README.md, AGENTS.md and
+# docs/decisions/0001-0004.
+format: ess/37
+system: identity
+version: v1
+
+domains:
+  - identity.errors        # the shared error body, src/lib.rs:2348-2425
+  - identity.login         # login transactions, authorization codes, identity links: src/lib.rs
+  - identity.credentials   # sessions and relying-party access tokens: src/lib.rs
+  - identity.directory     # memberships and groups: src/directory.rs
+  - identity.profile       # the personal collaboration profile: src/profile.rs
+
+# Not declared, because they hold no record and change nothing (src/lib.rs:2454-2463):
+# GET /livez (src/lib.rs:2579), GET /readyz and GET /healthz (src/lib.rs:2583),
+# GET /.well-known/identity-cli-login (src/lib.rs:2593) and
+# GET /.well-known/oauth-authorization-server (src/lib.rs:2607) answer from configuration alone.

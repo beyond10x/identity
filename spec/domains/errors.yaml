@@ -1,0 +1,49 @@
+domain: identity.errors
+
+summary: >-
+  The refusals Identity answers. Every one is the JSON body {error, error_description}
+  (src/lib.rs:2348-2351, 2413-2425); the error code and the status are fixed per constructor
+  (src/lib.rs:2360-2411). The description text varies per refusal and is cited at each outcome.
+
+# The body's two members are not declared as fields: every outcome would need a literal payload
+# for `error_description`, and the text is cited beside each refusal instead. Decision D3.
+
+errors:
+  - name: identity.errors.InvalidRequest
+    summary: 400 invalid_request, HttpError::invalid (src/lib.rs:2361-2367).
+    fields: []
+
+  - name: identity.errors.AccessDenied
+    summary: 401 access_denied, HttpError::denied (src/lib.rs:2369-2375).
+    fields: []
+
+  - name: identity.errors.Forbidden
+    summary: 403 access_denied, HttpError::forbidden (src/lib.rs:2377-2383).
+    fields: []
+
+  - name: identity.errors.NotFound
+    summary: 404 not_found, HttpError::missing (src/lib.rs:2385-2391).
+    fields: []
+
+  - name: identity.errors.Conflict
+    summary: 409 conflict, the stale profile revision (src/profile.rs:1535-1542).
+    fields: []
+
+  - name: identity.errors.Unprocessable
+    summary: >-
+      422 invalid_request, HttpError::unprocessable (src/lib.rs:2393-2401): a durable rule such as
+      an exhausted directory or profile row cap, a screened value, or a closed state.
+    fields: []
+
+  - name: identity.errors.ServerError
+    summary: >-
+      500 server_error, HttpError::internal (src/lib.rs:2403-2411). An exhausted credential-table
+      cap answers this, because prepare_insert bails with anyhow (src/lib.rs:2043-2045) and every
+      caller maps that to HttpError::internal.
+    fields: []
+
+  - name: identity.errors.UpstreamLoginRefused
+    summary: >-
+      401 with an HTML page, not the JSON body: the upstream provider returned `error` on the
+      callback (src/lib.rs:3114-3123).
+    fields: []

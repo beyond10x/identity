@@ -1,0 +1,38 @@
+# One process holds every domain: the identity binary (src/main.rs:22-67) serves one axum router
+# (src/lib.rs:2478, 2506-2530) over one store (src/lib.rs:1020-1025, 1216-1217).
+# Upstream OIDC providers are an external boundary: the code reaches them, they reach no command;
+# their answers appear as `external:` outcomes and as the callback's `error` input (src/lib.rs:3114-3123).
+# Decision D4: no event is published; src/ has no outbox, broker client or webhook sender.
+components:
+  - component: identity
+    summary: >-
+      The Identity service: upstream and local login, sessions and relying-party access tokens,
+      identity links, the tenant directory and the personal profile (README.md).
+    owns:
+      domains:
+        - identity.errors
+        - identity.login
+        - identity.credentials
+        - identity.directory
+        - identity.profile
+    accepts:
+      commands:
+        - identity.login.Authorize
+        - identity.login.SignInLocally
+        - identity.login.CompleteUpstreamLogin
+        - identity.login.StartIdentityLink
+        - identity.credentials.ExchangeAuthorizationCode
+        - identity.credentials.IssueAccessToken
+        - identity.credentials.ExchangeAccessToken
+        - identity.credentials.Logout
+        - identity.directory.SaveMember
+        - identity.directory.SaveGroup
+        - identity.directory.AddGroupMember
+        - identity.directory.RemoveGroupMember
+        - identity.profile.PutConsent
+        - identity.profile.RecordStatement
+        - identity.profile.ConfirmStatement
+        - identity.profile.RevokeStatement
+        - identity.profile.CorrectStatement
+        - identity.profile.ForgetStatement
+    reached_by: network        # IDENTITY_LISTEN, default 0.0.0.0:8080, src/main.rs:60-72

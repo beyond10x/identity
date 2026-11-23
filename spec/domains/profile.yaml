@@ -1,0 +1,761 @@
+domain: identity.profile
+
+summary: >-
+  The personal collaboration profile: statements with an epistemic state, the person's
+  profile-learning consent, and the immutable projection a learning consumer receives
+  (src/profile.rs:1-26). Every route is self-scoped: the session's subject is the profile's
+  subject (src/profile.rs:25-26, own_profile src/profile.rs:1106-1116, src/lib.rs:2506-2530).
+
+naming:
+  wire: profile
+  display: Profile
+
+# Self-scoping, decision D2: the code takes tenant_id and subject from the presented session.
+# ESS reads a caller attribute in `sets:`, `payload:` and `when_subject:`, but not in a
+# `when_related:` selector or a view filter (validate: "`caller.subject` reads `caller`, which is
+# not a declared observable root"). Every rule below that selects the person's other rows by the
+# session's subject is therefore an UNMAPPED marker, named where it applies.
+
+types:
+  - name: identity.profile.StatementId
+    naming:
+      summary: >-
+        "identity_profile_statement_v1_" + 22 base64url characters, 52 in all
+        (STATEMENT_ID_PREFIX src/profile.rs:75, STATEMENT_ID_TOKEN_CHARACTERS src/profile.rs:77,
+        new_statement_id src/profile.rs:1360-1365, validated_statement_id src/profile.rs:403-418).
+    kind: newtype
+    of: String
+    prefix: "identity_profile_statement_v1_"
+
+  - name: identity.profile.ProfileSubject
+    naming:
+      summary: 'The session subject a consent row belongs to (profile_consents.subject src/profile.rs:90).'
+    kind: newtype
+    of: String
+
+  - name: identity.profile.StatementKind
+    naming:
+      summary: 'STATEMENT_KINDS (src/profile.rs:65).'
+    kind: enum
+    variants: [friction, goal_horizon, preference, working_pattern]
+
+  - name: identity.profile.GoalHorizon
+    naming:
+      summary: 'GOAL_HORIZONS (src/profile.rs:66).'
+    kind: enum
+    variants: [long_term, session, short_term]
+
+  - name: identity.profile.SourceKind
+    naming:
+      summary: 'SOURCE_KINDS (src/profile.rs:67).'
+    kind: enum
+    variants: [conversation, datasource, person, workflow_run]
+
+  - name: identity.profile.LearnedState
+    naming:
+      summary: 'LEARNED_STATES (src/profile.rs:69): the only states a learning writer may create.'
+    kind: enum
+    variants: [inferred, observed]
+
+  - name: identity.profile.Source
+    naming:
+      summary: >-
+        SourceRequest (src/profile.rs:198-203): a closed kind:id pair. The stored
+        source_reference is "<kind>:<id>" (src/profile.rs:374).
+    kind: struct
+    fields:
+      - {name: kind, type: identity.profile.SourceKind}
+      - {name: id, type: String}
+
+conversions:
+  - from: String
+    to: identity.profile.ProfileSubject
+    because: >-
+      The consent row is keyed by the session's subject (put_consent src/profile.rs:1233-1238);
+      the actor attribute is the plain session subject.
+
+entities:
+  - name: identity.profile.ProfileStatement
+    # read from: table profile_statements src/profile.rs:103-120; StatementRecord
+    # src/profile.rs:170-187; write_statement src/profile.rs:735-751.
+    naming:
+      summary: >-
+        One statement about the person, with the evidence it came from and its epistemic
+        state. Forgetting deletes it (erase_statement src/profile.rs:1073-1099).
+    identity:
+      name: statement_id
+      type: identity.profile.StatementId
+    fields:
+      - name: tenant_id                  # src/profile.rs:105
+        type: String
+      - name: subject                    # src/profile.rs:106
+        type: String
+      - name: kind                       # src/profile.rs:107
+        type: identity.profile.StatementKind
+      - name: horizon                    # src/profile.rs:108
+        type: Optional<identity.profile.GoalHorizon>
+      - name: content                    # src/profile.rs:109; 1-512 characters, src/profile.rs:79, 334-349
+        type: String
+      - name: source_kind                # src/profile.rs:111
+        type: identity.profile.SourceKind
+      - name: source_reference           # src/profile.rs:112; "<kind>:<id>" src/profile.rs:374
+        type: String
+      - name: observed_at                # src/profile.rs:113; unix seconds
+        type: Integer
+      - name: created_at                 # src/profile.rs:114
+        type: Integer
+      - name: updated_at                 # src/profile.rs:115
+        type: Integer
+      - name: confirmed_at               # src/profile.rs:116
+        type: Optional<Integer>
+      - name: resolved_at                # src/profile.rs:117
+        type: Optional<Integer>
+      - name: superseded_by              # src/profile.rs:118; the correction that replaced it
+        type: Optional<String>
+      - name: created_state              # src/profile.rs:119; the state it was delivered in, src/profile.rs:735-737, 751
+        type: Optional<identity.profile.LearnedState>
+        summary: >-
+          NULL on a row written by 0.5.7 or earlier (src/profile.rs:86-87). Decision D10: while
+          the statement is Learned, this field says whether it is observed or inferred.
+    invariants:
+      # validated_content: 1-512 characters after trimming (src/profile.rs:334-342).
+      - content.count >= 1
+      - content.count <= 512
+      # validated_horizon: a goal_horizon statement names a horizon; no other kind carries one
+      # (src/profile.rs:315-332).
+      - any:
+          - all: [kind == goal_horizon, defined(horizon)]
+          - all: [kind != goal_horizon, not defined(horizon)]
+    # UNMAPPED: superseded_by names another statement (src/profile.rs:1500) but is stored as text
+    # with no foreign key, and link_correction erases the replacement on a lost race
+    # (src/profile.rs:1517-1529). Whether it is a `references` relation the code does not settle.
+    lifecycle:
+      # Read from epistemic_state (src/profile.rs:110; LEARNED_STATES, RESOLVED_STATES,
+      # CONFIRMED_STATE src/profile.rs:69-72).
+      # Decision D10: `observed` and `inferred` are one state, Learned. The code creates a statement
+      # in either and has no transition between them; ESS requires every state to be reachable
+      # from one initial state by declared transitions (validate: "`Observed` cannot be reached
+      # from `Inferred`"), and a transition no command takes is refused (missing_causation).
+      # UNMAPPED: the wire value of Learned is the delivered state, `observed` or `inferred`
+      # (created_state while Learned); a state carries one wire value.
+      initial: Learned
+      states:
+        - {name: Learned, summary: 'observed or inferred: what the system noticed or guessed (src/profile.rs:9-11).'}
+        - {name: Confirmed, wire: confirmed, summary: 'What the person said; only the person sets it (src/profile.rs:12-14).'}
+        - {name: Revoked, wire: revoked, summary: 'Withdrawn by the person, or replaced by a correction.'}
+        - {name: Rejected, wire: rejected, summary: 'Denied by the person.'}
+      terminal: []
+      transitions:
+        - name: confirm
+          from: [Learned, Confirmed]
+          to: Confirmed
+          summary: 'POST .../confirm (confirm_statement src/profile.rs:1419-1438).'
+        - name: revoke
+          from: [Learned, Confirmed, Revoked, Rejected]
+          to: Revoked
+          summary: 'POST .../revoke with revoked (revoke_statement src/profile.rs:1440-1456); no state is refused.'
+        - name: reject
+          from: [Learned, Confirmed, Revoked, Rejected]
+          to: Rejected
+          summary: 'POST .../revoke with rejected.'
+        - name: supersede
+          from: [Learned, Confirmed, Revoked, Rejected]
+          to: Revoked
+          summary: 'POST .../correct marks the original revoked and superseded (src/profile.rs:1497-1501, supersede_statement src/profile.rs:1024-1035).'
+
+  - name: identity.profile.ProfileConsent
+    # read from: table profile_consents src/profile.rs:88-95; ConsentRecord src/profile.rs:189-196;
+    # read_consent src/profile.rs:534-578; write_consent_at src/profile.rs:589-657.
+    naming:
+      summary: >-
+        The person's profile-learning consent (scope "profile.learning", src/profile.rs:63). It is
+        not a datasource grant, not an endpoint authority and not a scope (src/profile.rs:18-20).
+    identity:
+      name: subject
+      type: identity.profile.ProfileSubject
+    # UNMAPPED: the key is (tenant_id, subject, consent_scope) (src/profile.rs:94); the identity
+    # here is the subject alone, as in decision D6.
+    fields:
+      - name: tenant_id                  # src/profile.rs:89
+        type: String
+      - name: consent_scope              # src/profile.rs:91; always "profile.learning", src/profile.rs:621
+        type: String
+      - name: granted_at                 # src/profile.rs:92; 0 when never granted (NEVER_GRANTED src/profile.rs:525-528)
+        type: Integer
+      - name: revoked_at                 # src/profile.rs:93; learning is granted exactly when it is NULL (src/profile.rs:547-549)
+        type: Optional<Integer>
+      - name: excluded_sources
+        type: List<String>
+        summary: >-
+          Decision D9: the rows of profile_excluded_sources for this person (src/profile.rs:96-102,
+          read_exclusions src/profile.rs:659), held as one list because PutConsent replaces them
+          as a whole (replace_exclusions src/profile.rs:689-733) and the profile view answers them
+          as one list (src/profile.rs:1139).
+    lifecycle:
+      # Decision D11: structural. Granted or revoked is read from revoked_at
+      # (src/profile.rs:547-549), not a lifecycle: a first PUT creates the row in either, and the
+      # later PUT that moves between them addresses the row by the session's tenant and subject,
+      # which no ESS input names. Two creation states with no declared transition are refused as
+      # unreachable_state.
+      # UNMAPPED: a later PUT updates the row (ON CONFLICT DO UPDATE src/profile.rs:605-617): it
+      # clears revoked_at on a grant, keeps the first revoked_at on an opt-out, and moves
+      # granted_at only when learning goes from revoked to granted (src/profile.rs:589-592).
+      initial: Recorded
+      states: [Recorded]
+      terminal: [Recorded]
+
+actors:
+  - name: identity.profile.Person
+    # The person's own control surface: a session presented with x-b10x-audience
+    # urn:b10x:profile (PROFILE_AUDIENCE src/profile.rs:47; PERSON_CONTROL_AUDIENCES
+    # src/profile.rs:55; PROJECTION_AUDIENCES src/profile.rs:59). Decision D2.
+    naming:
+      display: Person (profile owner)
+    attributes:
+      - {name: tenant_id, type: String}
+      - {name: subject, type: String}
+    may:
+      - identity.profile.PutConsent
+      - identity.profile.RecordStatement
+      - identity.profile.ConfirmStatement
+      - identity.profile.RevokeStatement
+      - identity.profile.CorrectStatement
+      - identity.profile.ForgetStatement
+      - identity.profile.ProfileStatements
+      - identity.profile.ProfileConsentView
+      - identity.profile.Snapshot
+
+  - name: identity.profile.LearningConsumer
+    # A consumer presenting the person's session with urn:b10x:profile-projection: it reaches the
+    # projection and the learning write and nothing else (src/profile.rs:49-59, 1202, 1253).
+    naming:
+      display: Learning consumer
+    attributes:
+      - {name: tenant_id, type: String}
+      - {name: subject, type: String}
+    may:
+      - identity.profile.RecordStatement
+      - identity.profile.Snapshot
+
+events:
+  # Not published by Identity; decision D4.
+  - name: identity.profile.ConsentRecorded
+    fields:
+      - {name: subject, type: identity.profile.ProfileSubject}
+
+  - name: identity.profile.StatementRecorded
+    fields:
+      - {name: statement_id, type: identity.profile.StatementId}
+
+  - name: identity.profile.StatementConfirmed
+    fields:
+      - {name: statement_id, type: identity.profile.StatementId}
+
+  - name: identity.profile.StatementWithdrawn
+    fields:
+      - {name: statement_id, type: identity.profile.StatementId}
+
+  - name: identity.profile.StatementCorrected
+    fields:
+      - {name: statement_id, type: identity.profile.StatementId}
+
+  - name: identity.profile.StatementForgotten
+    fields:
+      - {name: statement_id, type: identity.profile.StatementId}
+
+outcome_groups:
+  - name: profile-session
+    domain: identity.profile
+    outcomes:
+      - name: profile-session-refused
+        external: >-
+          x-b10x-audience is not one the route admits, or the bearer is no live Identity session
+          (admitted_session_for_audiences src/lib.rs:2548-2567); the code checks this before the
+          request's own fields (src/profile.rs:1211, 1253, 1424, 1446, 1464, 1548)
+        error: identity.errors.AccessDenied
+
+commands:
+  - name: identity.profile.PutConsent
+    # PUT /v1/profile/consent (src/lib.rs:2511), put_consent src/profile.rs:1206-1246;
+    # ConsentRequest src/profile.rs:205-211 (deny_unknown_fields).
+    naming:
+      wire: consent
+      display: Record profile-learning consent
+      summary: >-
+        Records the person's learning choice and replaces the excluded sources; answers the
+        durable profile view (src/profile.rs:1245).
+    input:
+      - {name: learning, type: Boolean}
+      - name: excluded_sources
+        type: List<identity.profile.Source>
+        example: [{kind: datasource, id: drive-1}]
+        summary: Defaults to [] (src/profile.rs:209-210).
+    # UNMAPPED: each excluded source passes validated_source (src/profile.rs:420-430, 353-381):
+    # kind trimmed and lowercased, id 1-128 bytes of [A-Za-z0-9._:@-] starting alphanumerically,
+    # reference not credential-shaped (422). The excluded_sources field stores "<kind>:<id>" for
+    # each, which ESS cannot build from the input list, so it is left generated.
+    # UNMAPPED: a first consent is refused past 100 000 per tenant (MAX_PROFILE_CONSENTS
+    # src/profile.rs:83, src/profile.rs:1213-1232); the count selects by the session's tenant.
+    # UNMAPPED: a PUT for a person who already has a consent row updates it (see the entity).
+    outcomes:
+      - name: too-many-exclusions
+        when: excluded_sources.count > 64
+        error: identity.errors.InvalidRequest
+        summary: '"at most 64 excluded sources may be recorded" (MAX_EXCLUDED_SOURCES src/profile.rs:84, 421-425).'
+
+      - name: granted
+        when: learning == true
+        creates: identity.profile.ProfileConsent
+        instance: subject
+        sets:
+          tenant_id: {caller: tenant_id}
+          consent_scope: "profile.learning"
+          granted_at: {generated: true}
+          revoked_at: {cleared: true}
+          excluded_sources: {generated: true}
+        emits: [identity.profile.ConsentRecorded]
+        payload:
+          identity.profile.ConsentRecorded: {subject: {caller: subject}}
+        summary: 'A first grant: granted_at = now, revoked_at NULL (src/profile.rs:600-601).'
+
+      - name: opted-out
+        creates: identity.profile.ProfileConsent
+        instance: subject
+        sets:
+          tenant_id: {caller: tenant_id}
+          consent_scope: "profile.learning"
+          granted_at: 0
+          revoked_at: {generated: true, present: true}
+          excluded_sources: {generated: true}
+        emits: [identity.profile.ConsentRecorded]
+        payload:
+          identity.profile.ConsentRecorded: {subject: {caller: subject}}
+        summary: 'Opting out before ever opting in records a revocation with no grant: granted_at 0 (src/profile.rs:591-592, 600-601).'
+
+  - name: identity.profile.RecordStatement
+    # POST /v1/profile/statements (src/lib.rs:2513), create_statement src/profile.rs:1248-1315;
+    # StatementRequest src/profile.rs:213-222 (deny_unknown_fields).
+    naming:
+      wire: statements
+      display: Record a learned statement
+      summary: >-
+        The learning write: retains one observed or inferred statement and answers the
+        projection, never the durable store (src/profile.rs:1313-1314).
+    input:
+      - {name: kind, type: identity.profile.StatementKind}
+      - {name: horizon, type: Optional<identity.profile.GoalHorizon>}
+      - {name: content, type: String}
+      - {name: epistemic_state, type: String}
+      - name: source
+        type: identity.profile.Source
+        example: {kind: conversation, id: conv-1}
+    # UNMAPPED: kind, horizon and source kind are trimmed and ASCII-lowercased before the check,
+    # and an empty horizon counts as absent (src/profile.rs:306, 317-319, 354); the inputs are typed
+    # by their closed sets instead.
+    # UNMAPPED: content is trimmed before the length check, control characters are refused, and
+    # credential-shaped content or source reference is refused 422 (secret_shape
+    # src/screening.rs:64; src/profile.rs:334-347, 374-379).
+    # UNMAPPED: the request is refused 403 without an active profile.learning consent
+    # (src/profile.rs:1260-1267) or when the source reference is one of the person's excluded
+    # sources (src/profile.rs:1268-1275). Both read the person's rows by the session's subject.
+    # UNMAPPED: a repeat delivery (same source reference, kind, horizon, delivered state and
+    # whitespace-collapsed content, repeat_delivery src/profile.rs:1323-1358) adds nothing and
+    # answers the projection, checked before the caps and again under them (src/profile.rs:1292-1312).
+    # It selects by the session's subject and compares collapsed whitespace.
+    # UNMAPPED: past 512 statements for the subject or 200 000 for the tenant a new statement is
+    # refused 422 (MAX_STATEMENTS_PER_SUBJECT, MAX_PROFILE_STATEMENTS src/profile.rs:81-82,
+    # admit_new_statement src/profile.rs:1378-1406); both counts select by the session.
+    # UNMAPPED: source_reference is "<kind>:<id>" (src/profile.rs:374), which ESS cannot build;
+    # it is left generated.
+    outcomes:
+      - name: horizon-missing
+        when: {all: [kind == goal_horizon, not defined(horizon)]}
+        error: identity.errors.InvalidRequest
+        summary: '"a goal_horizon statement must name a long_term, session, or short_term horizon" (src/profile.rs:324-326).'
+
+      - name: horizon-not-allowed
+        when: {all: [kind != goal_horizon, defined(horizon)]}
+        error: identity.errors.InvalidRequest
+        summary: '"only a goal_horizon statement may carry a horizon" (src/profile.rs:328-330).'
+
+      - name: bad-content
+        when: {any: [content.count < 1, content.count > 512]}
+        error: identity.errors.InvalidRequest
+        summary: '"statement content must be 1-512 characters without control characters" (src/profile.rs:336-341).'
+
+      - name: bad-source-id
+        when: {any: [source.id.count < 1, source.id.count > 128]}
+        error: identity.errors.InvalidRequest
+        summary: 'src/profile.rs:360-373; only the length is declared.'
+
+      - name: not-learned
+        when:
+          not:
+            any: [epistemic_state == "observed", epistemic_state == "inferred"]
+        error: identity.errors.Unprocessable
+        summary: '"a learned statement must be observed or inferred; only the person can confirm" (validated_learned_state src/profile.rs:383-391). UNMAPPED: the value is trimmed and lowercased first (src/profile.rs:384).'
+
+      - name: observed
+        when: epistemic_state == "observed"
+        creates: identity.profile.ProfileStatement
+        instance: statement_id
+        sets:
+          tenant_id: {caller: tenant_id}
+          subject: {caller: subject}
+          kind: input.kind
+          horizon: input.horizon
+          content: input.content
+          source_kind: input.source.kind
+          source_reference: {generated: true}
+          created_state: observed
+          observed_at: {generated: true}
+          created_at: {generated: true}
+          updated_at: {generated: true}
+          confirmed_at: {cleared: true}
+          resolved_at: {cleared: true}
+          superseded_by: {cleared: true}
+        emits: [identity.profile.StatementRecorded]
+        payload:
+          identity.profile.StatementRecorded: {statement_id: {generated: true}}
+        summary: 'Inserted in the delivered state, kept in created_state as well (src/profile.rs:1276-1291, 1308-1310, 751).'
+
+      - name: inferred
+        creates: identity.profile.ProfileStatement
+        instance: statement_id
+        sets:
+          tenant_id: {caller: tenant_id}
+          subject: {caller: subject}
+          kind: input.kind
+          horizon: input.horizon
+          content: input.content
+          source_kind: input.source.kind
+          source_reference: {generated: true}
+          created_state: inferred
+          observed_at: {generated: true}
+          created_at: {generated: true}
+          updated_at: {generated: true}
+          confirmed_at: {cleared: true}
+          resolved_at: {cleared: true}
+          superseded_by: {cleared: true}
+        emits: [identity.profile.StatementRecorded]
+        payload:
+          identity.profile.StatementRecorded: {statement_id: {generated: true}}
+
+  - name: identity.profile.ConfirmStatement
+    # POST /v1/profile/statements/{statement_id}/confirm (src/lib.rs:2519-2520),
+    # confirm_statement src/profile.rs:1419-1438.
+    naming:
+      wire: confirm-statement
+      display: Confirm a statement
+      summary: The only way into Confirmed; answers the durable profile view (src/profile.rs:1437).
+    input:
+      - {name: statement_id, type: identity.profile.StatementId}
+    # UNMAPPED: confirmed_at keeps an earlier value and is now otherwise
+    # (`record.confirmed_at.unwrap_or(now)` src/profile.rs:1434); ESS declares one or the other.
+    # UNMAPPED: the id's 22 characters must be base64url (valid_b64_token src/profile.rs:406-412);
+    # only the length is declared.
+    outcomes:
+      - name: malformed-id
+        when: statement_id.count != 52
+        error: identity.errors.InvalidRequest
+        summary: '"malformed profile statement id" (validated_statement_id src/profile.rs:403-418, 1425).'
+
+      - name: not-found
+        unknown_instance: true
+        error: identity.errors.NotFound
+        summary: '"no such statement in this profile" (own_statement src/profile.rs:1408-1417).'
+
+      - name: not-own
+        when_subject: {predicate: {any: [subject != caller.subject, tenant_id != caller.tenant_id]}}
+        error: identity.errors.NotFound
+        summary: 'The lookup is scoped to the session''s tenant and subject (src/profile.rs:1413), so another person''s statement is the same 404.'
+
+      - name: confirmed
+        moves: identity.profile.ProfileStatement.confirm
+        instance: statement_id
+        sets:
+          updated_at: {generated: true}
+          confirmed_at: {generated: true, present: true}
+        emits: [identity.profile.StatementConfirmed]
+        payload:
+          identity.profile.StatementConfirmed: {statement_id: input.statement_id}
+        summary: 'src/profile.rs:1432-1436.'
+
+      - name: withdrawn
+        wrong_state: true
+        error: identity.errors.Unprocessable
+        summary: '"a withdrawn statement cannot be confirmed; make a correction instead" (src/profile.rs:1427-1431).'
+
+  - name: identity.profile.RevokeStatement
+    # POST /v1/profile/statements/{statement_id}/revoke (src/lib.rs:2523-2524),
+    # revoke_statement src/profile.rs:1440-1456; RevocationRequest src/profile.rs:224-228.
+    naming:
+      wire: revoke-statement
+      display: Withdraw a statement
+      summary: Moves a statement to revoked or rejected from any state; answers the durable profile view.
+    input:
+      - {name: statement_id, type: identity.profile.StatementId}
+      - {name: epistemic_state, type: String}
+    outcomes:
+      - name: malformed-id
+        when: statement_id.count != 52
+        error: identity.errors.InvalidRequest
+        summary: 'src/profile.rs:1447.'
+
+      - name: bad-state
+        when:
+          not:
+            any: [epistemic_state == "revoked", epistemic_state == "rejected"]
+        error: identity.errors.InvalidRequest
+        summary: '"a withdrawal must set the state to revoked or rejected" (validated_resolved_state src/profile.rs:393-401), checked before the lookup (src/profile.rs:1448). UNMAPPED: trimmed and lowercased first (src/profile.rs:394).'
+
+      - name: not-found
+        unknown_instance: true
+        error: identity.errors.NotFound
+        summary: '"no such statement in this profile" (src/profile.rs:1449, 1408-1417).'
+
+      - name: not-own
+        when_subject: {predicate: {any: [subject != caller.subject, tenant_id != caller.tenant_id]}}
+        error: identity.errors.NotFound
+
+      - name: revoked
+        when: epistemic_state == "revoked"
+        moves: identity.profile.ProfileStatement.revoke
+        instance: statement_id
+        sets:
+          resolved_at: {generated: true, present: true}
+          updated_at: {generated: true}
+        emits: [identity.profile.StatementWithdrawn]
+        payload:
+          identity.profile.StatementWithdrawn: {statement_id: input.statement_id}
+        summary: 'resolved_at = now, also on a statement already withdrawn (src/profile.rs:1450-1454).'
+
+      - name: rejected
+        moves: identity.profile.ProfileStatement.reject
+        instance: statement_id
+        sets:
+          resolved_at: {generated: true, present: true}
+          updated_at: {generated: true}
+        emits: [identity.profile.StatementWithdrawn]
+        payload:
+          identity.profile.StatementWithdrawn: {statement_id: input.statement_id}
+
+  - name: identity.profile.CorrectStatement
+    # POST /v1/profile/statements/{statement_id}/correct (src/lib.rs:2527-2528),
+    # correct_statement src/profile.rs:1458-1503; CorrectionRequest src/profile.rs:230-238;
+    # link_correction src/profile.rs:1505-1530.
+    naming:
+      wire: correct-statement
+      display: Correct a statement
+      summary: >-
+        Replaces a statement with a confirmed person-sourced revision and marks the original
+        revoked and superseded; answers the durable profile view (src/profile.rs:1502).
+    input:
+      - {name: statement_id, type: identity.profile.StatementId}
+      - {name: content, type: String}
+      - {name: kind, type: Optional<identity.profile.StatementKind>}
+      - {name: horizon, type: Optional<identity.profile.GoalHorizon>}
+    # UNMAPPED: the replacement statement (new id, the corrected kind, horizon and content, state
+    # confirmed, source person:self, src/profile.rs:1481-1496) is inserted beside the move of the
+    # original; an outcome has one subject, so the insert is not declared.
+    # UNMAPPED: the replacement is held to the subject and tenant caps (persist_new_statement
+    # src/profile.rs:1367-1376), which select by the session.
+    # UNMAPPED: the horizon rule reads the stored kind and horizon when the request names no kind
+    # or no horizon (src/profile.rs:1470-1478).
+    # UNMAPPED: when a concurrent correction or a forget wins between the insert and the link, the
+    # replacement is erased again and the answer is 409 or 404 (link_correction
+    # src/profile.rs:1505-1530).
+    outcomes:
+      - name: malformed-id
+        when: statement_id.count != 52
+        error: identity.errors.InvalidRequest
+        summary: 'src/profile.rs:1465.'
+
+      - name: not-found
+        unknown_instance: true
+        error: identity.errors.NotFound
+        summary: '"no such statement in this profile" (src/profile.rs:1466).'
+
+      - name: not-own
+        when_subject: {predicate: {any: [subject != caller.subject, tenant_id != caller.tenant_id]}}
+        error: identity.errors.NotFound
+
+      - name: stale-revision
+        when_subject: {predicate: defined(superseded_by)}
+        error: identity.errors.Conflict
+        summary: '"this statement was already corrected; correct its current revision instead" (src/profile.rs:1467-1469, 1532-1541).'
+
+      - name: bad-content
+        when_subject: {predicate: {any: [input.content.count < 1, input.content.count > 512]}}
+        error: identity.errors.InvalidRequest
+        summary: 'Checked after the lookup and the stale check (src/profile.rs:1479, 334-342).'
+
+      - name: corrected
+        moves: identity.profile.ProfileStatement.supersede
+        instance: statement_id
+        sets:
+          superseded_by: {generated: true, present: true}
+          resolved_at: {generated: true, present: true}
+          updated_at: {generated: true}
+        emits: [identity.profile.StatementCorrected]
+        payload:
+          identity.profile.StatementCorrected: {statement_id: input.statement_id}
+        summary: 'src/profile.rs:1497-1501.'
+
+  - name: identity.profile.ForgetStatement
+    # DELETE /v1/profile/statements/{statement_id} (src/lib.rs:2515-2516), forget_statement
+    # src/profile.rs:1543-1562; erase_statement src/profile.rs:1073-1099.
+    naming:
+      wire: forget-statement
+      display: Forget a statement
+      summary: Forgetting is a deletion, not a state change; answers the durable profile view (src/profile.rs:1561).
+    input:
+      - {name: statement_id, type: identity.profile.StatementId}
+    outcomes:
+      - name: malformed-id
+        when: statement_id.count != 52
+        error: identity.errors.InvalidRequest
+        summary: 'src/profile.rs:1549.'
+
+      - name: not-found
+        unknown_instance: true
+        error: identity.errors.NotFound
+        summary: '"no such statement in this profile" (src/profile.rs:1558-1560).'
+
+      - name: not-own
+        when_subject: {predicate: {any: [subject != caller.subject, tenant_id != caller.tenant_id]}}
+        error: identity.errors.NotFound
+        summary: 'The DELETE is scoped to the session''s tenant and subject (src/profile.rs:1081-1082).'
+
+      - name: forgotten
+        deletes: identity.profile.ProfileStatement
+        instance: statement_id
+        emits: [identity.profile.StatementForgotten]
+        payload:
+          identity.profile.StatementForgotten: {statement_id: input.statement_id}
+
+views:
+  - name: identity.profile.ProfileStatements
+    # GET /v1/profile (src/lib.rs:2510), statements part: read_profile src/profile.rs:1190-1196,
+    # durable_response src/profile.rs:1118-1164; RetainedStatementView src/profile.rs:255-272.
+    # Self-scoped by the session; parameters here (decision D2).
+    # UNMAPPED: model_visible and withheld_reason per statement are computed from consent,
+    # exclusions, state and the credential screen (withheld_reason src/profile.rs:432-451).
+    source: identity.profile.ProfileStatement
+    consistency: read_your_writes
+    params:
+      - {name: tenant_id, type: String}
+      - {name: subject, type: String}
+    filter:
+      all:
+        - tenant_id == param.tenant_id
+        - subject == param.subject
+    fields:
+      - {name: statement_id, type: identity.profile.StatementId}
+      - {name: kind, type: identity.profile.StatementKind}
+      - {name: horizon, type: Optional<identity.profile.GoalHorizon>}
+      - {name: content, type: String}
+      - {name: state, type: identity.profile.ProfileStatement.State}     # epistemic_state
+      - {name: created_state, type: Optional<identity.profile.LearnedState>}
+      - {name: source_kind, type: identity.profile.SourceKind}
+      - {name: source_reference, type: String}
+      - {name: observed_at, type: Integer}
+      - {name: created_at, type: Integer}
+      - {name: updated_at, type: Integer}
+      - {name: confirmed_at, type: Optional<Integer>}
+      - {name: resolved_at, type: Optional<Integer>}
+      - {name: superseded_by, type: Optional<String>}
+    naming:
+      wire: profile
+      display: Profile statements
+
+  - name: identity.profile.ProfileConsentView
+    # GET /v1/profile, consent part: learning_consent, consent_scope, consent_granted_at,
+    # consent_revoked_at, excluded_sources (ProfileView src/profile.rs:240-253, 1130-1139).
+    # UNMAPPED: learning_consent is `revoked_at IS NULL` and false with no row; consent_granted_at
+    # is null where granted_at is 0 (granted() src/profile.rs:530-532). Both are derived values.
+    source: identity.profile.ProfileConsent
+    consistency: read_your_writes
+    params:
+      - {name: subject, type: identity.profile.ProfileSubject}
+    filter: subject == param.subject
+    fields:
+      - {name: consent_scope, type: String}
+      - {name: granted_at, type: Integer}
+      - {name: revoked_at, type: Optional<Integer>}
+      - {name: excluded_sources, type: List<String>}
+    naming:
+      wire: profile-consent
+      display: Profile consent
+
+  - name: identity.profile.Snapshot
+    # GET /v1/profile/snapshot (src/lib.rs:2512), read_snapshot src/profile.rs:1198-1204; project
+    # src/profile.rs:453-490; ProfileSnapshot src/profile.rs:274-287, SnapshotStatement
+    # src/profile.rs:289-303. Reachable under urn:b10x:profile and urn:b10x:profile-projection
+    # (src/profile.rs:59, 1202).
+    # UNMAPPED: a statement is in the projection only while learning consent is granted, its
+    # source is not excluded and neither its content nor its source reference is credential-shaped
+    # (withheld_reason src/profile.rs:432-451); `confirmed` is state == confirmed
+    # (src/profile.rs:471); snapshot_id is a SHA-256 over the projected content
+    # (src/profile.rs:492-518). Only the state rule is declared.
+    source: identity.profile.ProfileStatement
+    consistency: read_your_writes
+    params:
+      - {name: tenant_id, type: String}
+      - {name: subject, type: String}
+    filter:
+      all:
+        - tenant_id == param.tenant_id
+        - subject == param.subject
+        - any: [state == Learned, state == Confirmed]
+    fields:
+      - {name: statement_id, type: identity.profile.StatementId}
+      - {name: kind, type: identity.profile.StatementKind}
+      - {name: horizon, type: Optional<identity.profile.GoalHorizon>}
+      - {name: state, type: identity.profile.ProfileStatement.State}     # epistemic_state
+      - {name: created_state, type: Optional<identity.profile.LearnedState>}
+      - {name: content, type: String}
+      - {name: source_kind, type: identity.profile.SourceKind}
+      - {name: source_reference, type: String}
+      - {name: observed_at, type: Integer}
+    naming:
+      wire: snapshot
+      display: Profile snapshot
+
+  - name: identity.profile.AllStatements
+    # Structural, not a read the code has: every person's statements, for the invariant checks.
+    source: identity.profile.ProfileStatement
+    consistency: read_your_writes
+    fields:
+      - {name: statement_id, type: identity.profile.StatementId}
+      - {name: kind, type: identity.profile.StatementKind}
+      - {name: horizon, type: Optional<identity.profile.GoalHorizon>}
+      - {name: content, type: String}
+      - {name: superseded_by, type: Optional<String>}
+      - {name: state, type: identity.profile.ProfileStatement.State}
+      - {name: tenant_id, type: String}
+      - {name: subject, type: String}
+      - {name: source_kind, type: identity.profile.SourceKind}
+      - {name: source_reference, type: String}
+      - {name: observed_at, type: Integer}
+      - {name: created_at, type: Integer}
+      - {name: updated_at, type: Integer}
+      - {name: confirmed_at, type: Optional<Integer>}
+      - {name: resolved_at, type: Optional<Integer>}
+      - {name: created_state, type: Optional<identity.profile.LearnedState>}
+    naming:
+      wire: all-statements
+      display: All statements (structural)
+
+  - name: identity.profile.AllConsents
+    # Structural, not a read the code has.
+    source: identity.profile.ProfileConsent
+    consistency: read_your_writes
+    fields:
+      - {name: subject, type: identity.profile.ProfileSubject}
+      - {name: tenant_id, type: String}
+      - {name: granted_at, type: Integer}
+      - {name: revoked_at, type: Optional<Integer>}
+    naming:
+      wire: all-consents
+      display: All consents (structural)
