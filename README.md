@@ -50,8 +50,8 @@ three component checks. Green here is the bar for main.
 
 | step | command |
 |---|---|
-| tests (each test 60 s, the step 120 s) | `timeout 120 cargo nextest run --workspace --locked` |
-| tests, dev-login posture | `timeout 120 cargo nextest run --workspace --locked --features local-login` |
+| tests (each test 60 s, the test run 120 s) | `timeout 600 cargo nextest run --workspace --locked` |
+| tests, dev-login posture | `timeout 600 cargo nextest run --workspace --locked --features local-login` |
 | lint | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | lint, dev-login posture | `cargo clippy --workspace --all-targets --locked --features local-login -- -D warnings` |
 | format | `cargo fmt --all --check` |

@@ -122,9 +122,9 @@ In order:
 
 ```text
 cargo nextest run --workspace --locked --no-run
-timeout 120 cargo nextest run --workspace --locked
+timeout 600 cargo nextest run --workspace --locked
 cargo nextest run --workspace --locked --features local-login --no-run
-timeout 120 cargo nextest run --workspace --locked --features local-login
+timeout 600 cargo nextest run --workspace --locked --features local-login
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy --workspace --all-targets --locked --features local-login -- -D warnings
 cargo fmt --all --check
@@ -138,9 +138,11 @@ Both feature postures are gated because invariant 8 is a property of *both* buil
 bar for `main`.
 
 **Test budget.** cargo-nextest kills a test that runs over 60 s and counts it failed
-(`.config/nextest.toml`). Each `timeout 120` test step fails when it runs over 120 s of wall time;
-the `--no-run` step before it builds the test binaries, so the budget measures the tests. After each
-test step the gate prints the ten slowest tests (`scripts/slowest-tests.sh`). Test builds carry no
+(`.config/nextest.toml`). Each test step fails when its test run took over 120 s, read from the
+`time` of nextest's JUnit report (`target/nextest/default/junit.xml`): the `--no-run` step before it
+builds the test binaries, and a wait for a slot of the shared build pool does not count. `timeout 600`
+only guards against a hung step. After each test step, passed or failed, the gate prints the ten
+slowest tests (`scripts/slowest-tests.sh`). Test builds carry no
 debug info (`.cargo/config.toml`). The crate has no doctests; add `cargo test --doc` to the gate
 with the first one.
 
