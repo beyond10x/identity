@@ -1,0 +1,14 @@
+{
+  "name": "identity-docs-ux",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "measure": "node measure.mjs",
+    "test": "playwright test --workers=2"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.65.0",
+    "axe-core": "4.14.1"
+  }
+}
