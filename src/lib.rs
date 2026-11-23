@@ -3107,6 +3107,11 @@ pub fn local_login_admitted(config: &Config) -> bool {
     local_login::admitted(config)
 }
 
+/// The page a completed identity link answers with. Identity serves every relying party, so it
+/// names none of them (README, docs/decisions/0004).
+const IDENTITY_LINKED_PAGE: &str = "<!doctype html><title>Identity linked</title><h1>Identity linked</h1>\
+     <p>You can close this window and return to the application.</p>";
+
 #[allow(clippy::too_many_lines)]
 async fn upstream_callback(
     State(state): State<AppState>,
@@ -3252,11 +3257,7 @@ async fn upstream_callback(
                 ));
             }
         }
-        return Ok(Html(
-            "<!doctype html><title>Identity linked</title><h1>Identity linked</h1><p>You can return to Devcenter.</p>"
-                .to_owned(),
-        )
-        .into_response());
+        return Ok(Html(IDENTITY_LINKED_PAGE.to_owned()).into_response());
     }
     let identity = if let Some(linked) = state
         .store
@@ -5206,6 +5207,21 @@ mod tests {
             .unwrap()
             .expect("a logout in one tenant must not revoke the same subject in another tenant");
         assert_eq!(other.tenant_id, other_tenant);
+    }
+
+    #[test]
+    fn the_identity_linked_page_names_no_product() {
+        assert!(
+            IDENTITY_LINKED_PAGE
+                .contains("You can close this window and return to the application."),
+            "{IDENTITY_LINKED_PAGE}"
+        );
+        assert!(
+            !IDENTITY_LINKED_PAGE
+                .to_ascii_lowercase()
+                .contains("devcenter"),
+            "Identity names no relying-party product: {IDENTITY_LINKED_PAGE}"
+        );
     }
 
     #[test]
