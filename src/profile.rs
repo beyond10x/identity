@@ -178,7 +178,8 @@ pub(crate) struct StatementRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConsentRecord {
     pub(crate) learning: bool,
-    pub(crate) granted_at: i64,
+    /// `None` when the person has never granted learning.
+    pub(crate) granted_at: Option<i64>,
     pub(crate) revoked_at: Option<i64>,
 }
 
@@ -509,7 +510,16 @@ fn absorb(digest: &mut Sha256, field: &str) {
     digest.update(field.as_bytes());
 }
 
-async fn read_consent(
+/// The `granted_at` value of a person who opted out before ever opting in. The column is
+/// `NOT NULL` in every released schema and an older binary reads it as a number, so a missing
+/// grant is recorded as this value, which no real clock produces, rather than as `NULL`.
+const NEVER_GRANTED: i64 = 0;
+
+fn granted(stored: i64) -> Option<i64> {
+    (stored != NEVER_GRANTED).then_some(stored)
+}
+
+pub(crate) async fn read_consent(
     store: &Store,
     tenant_id: &str,
     subject: &str,
@@ -525,7 +535,7 @@ async fn read_consent(
                     let revoked_at: Option<i64> = row.get(1)?;
                     Ok(ConsentRecord {
                         learning: revoked_at.is_none(),
-                        granted_at: row.get(0)?,
+                        granted_at: granted(row.get(0)?),
                         revoked_at,
                     })
                 },
@@ -546,7 +556,7 @@ async fn read_consent(
                     let revoked_at: Option<i64> = row.get(1);
                     ConsentRecord {
                         learning: revoked_at.is_none(),
-                        granted_at: row.get(0),
+                        granted_at: granted(row.get(0)),
                         revoked_at,
                     }
                 })
@@ -561,7 +571,21 @@ pub(crate) async fn write_consent(
     subject: &str,
     learning: bool,
 ) -> Result<()> {
-    let now = unix_time()?;
+    write_consent_at(store, tenant_id, subject, learning, unix_time()?).await
+}
+
+/// Records the person's choice at `now` without rewriting its history. The grant time moves only
+/// when learning goes from not granted to granted; saving the same choice again, or changing only
+/// the exclusions, keeps both times; and opting out before ever opting in records a revocation
+/// with no grant.
+pub(crate) async fn write_consent_at(
+    store: &Store,
+    tenant_id: &str,
+    subject: &str,
+    learning: bool,
+    now: i64,
+) -> Result<()> {
+    let granted_at = if learning { now } else { NEVER_GRANTED };
     let revoked_at = if learning { None } else { Some(now) };
     match store {
         Store::Sqlite(_) => {
@@ -570,9 +594,22 @@ pub(crate) async fn write_consent(
                    (tenant_id, subject, consent_scope, granted_at, revoked_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT (tenant_id, subject, consent_scope) DO UPDATE SET
-                   granted_at = excluded.granted_at,
-                   revoked_at = excluded.revoked_at",
-                params![tenant_id, subject, LEARNING_CONSENT_SCOPE, now, revoked_at],
+                   granted_at = CASE
+                     WHEN excluded.revoked_at IS NULL AND profile_consents.revoked_at IS NOT NULL
+                       THEN excluded.granted_at
+                     ELSE profile_consents.granted_at
+                   END,
+                   revoked_at = CASE
+                     WHEN excluded.revoked_at IS NULL THEN NULL
+                     ELSE COALESCE(profile_consents.revoked_at, excluded.revoked_at)
+                   END",
+                params![
+                    tenant_id,
+                    subject,
+                    LEARNING_CONSENT_SCOPE,
+                    granted_at,
+                    revoked_at
+                ],
             )?;
         }
         Store::Postgres(postgres) => {
@@ -584,13 +621,20 @@ pub(crate) async fn write_consent(
                        (tenant_id, subject, consent_scope, granted_at, revoked_at)
                      VALUES ($1, $2, $3, $4, $5)
                      ON CONFLICT (tenant_id, subject, consent_scope) DO UPDATE SET
-                       granted_at = excluded.granted_at,
-                       revoked_at = excluded.revoked_at",
+                       granted_at = CASE
+                         WHEN excluded.revoked_at IS NULL AND profile_consents.revoked_at IS NOT NULL
+                           THEN excluded.granted_at
+                         ELSE profile_consents.granted_at
+                       END,
+                       revoked_at = CASE
+                         WHEN excluded.revoked_at IS NULL THEN NULL
+                         ELSE COALESCE(profile_consents.revoked_at, excluded.revoked_at)
+                       END",
                     &[
                         &tenant_id,
                         &subject,
                         &LEARNING_CONSENT_SCOPE,
-                        &now,
+                        &granted_at,
                         &revoked_at,
                     ],
                 )
@@ -1070,7 +1114,7 @@ async fn durable_response(state: &AppState, owner: &ProfileSubject) -> Result<Re
         sub: owner.subject.clone(),
         learning_consent: learning,
         consent_scope: LEARNING_CONSENT_SCOPE,
-        consent_granted_at: consent.map(|consent| consent.granted_at),
+        consent_granted_at: consent.and_then(|consent| consent.granted_at),
         consent_revoked_at: consent.and_then(|consent| consent.revoked_at),
         excluded_sources: exclusions.iter().cloned().collect(),
         statements: statements
@@ -1498,7 +1542,7 @@ mod tests {
     fn granted_consent() -> ConsentRecord {
         ConsentRecord {
             learning: true,
-            granted_at: 1_000,
+            granted_at: Some(1_000),
             revoked_at: None,
         }
     }
@@ -1506,7 +1550,7 @@ mod tests {
     fn revoked_consent() -> ConsentRecord {
         ConsentRecord {
             learning: false,
-            granted_at: 1_000,
+            granted_at: Some(1_000),
             revoked_at: Some(2_000),
         }
     }
@@ -2197,6 +2241,89 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn saving_learning_preferences_keeps_the_consent_history() {
+        use super::{read_consent, replace_exclusions, write_consent_at};
+        let store = Store::in_memory().unwrap();
+        let times = |consent: Option<ConsentRecord>| {
+            let consent = consent.unwrap();
+            (consent.learning, consent.granted_at, consent.revoked_at)
+        };
+
+        // Saving the same choice again keeps the first grant.
+        write_consent_at(&store, TENANT, "same-choice", true, 100)
+            .await
+            .unwrap();
+        write_consent_at(&store, TENANT, "same-choice", true, 200)
+            .await
+            .unwrap();
+        assert_eq!(
+            times(read_consent(&store, TENANT, "same-choice").await.unwrap()),
+            (true, Some(100), None)
+        );
+
+        // Opting out as the first action records a revocation and no grant; opting out again
+        // keeps the first revocation.
+        write_consent_at(&store, TENANT, "opted-out", false, 400)
+            .await
+            .unwrap();
+        assert_eq!(
+            times(read_consent(&store, TENANT, "opted-out").await.unwrap()),
+            (false, None, Some(400))
+        );
+        write_consent_at(&store, TENANT, "opted-out", false, 450)
+            .await
+            .unwrap();
+        assert_eq!(
+            times(read_consent(&store, TENANT, "opted-out").await.unwrap()),
+            (false, None, Some(400))
+        );
+        // Opting in later is a real grant, at the time it happens.
+        write_consent_at(&store, TENANT, "opted-out", true, 500)
+            .await
+            .unwrap();
+        assert_eq!(
+            times(read_consent(&store, TENANT, "opted-out").await.unwrap()),
+            (true, Some(500), None)
+        );
+
+        // Changing only the exclusions keeps the grant.
+        write_consent_at(&store, TENANT, "exclusions", true, 100)
+            .await
+            .unwrap();
+        write_consent_at(&store, TENANT, "exclusions", true, 300)
+            .await
+            .unwrap();
+        replace_exclusions(
+            &store,
+            TENANT,
+            "exclusions",
+            &BTreeSet::from(["datasource:slack-incidents".to_owned()]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            times(read_consent(&store, TENANT, "exclusions").await.unwrap()),
+            (true, Some(100), None)
+        );
+
+        // Revoking keeps the grant it revokes; granting again after that is a new grant.
+        write_consent_at(&store, TENANT, "exclusions", false, 600)
+            .await
+            .unwrap();
+        assert_eq!(
+            times(read_consent(&store, TENANT, "exclusions").await.unwrap()),
+            (false, Some(100), Some(600))
+        );
+        write_consent_at(&store, TENANT, "exclusions", true, 700)
+            .await
+            .unwrap();
+        assert_eq!(
+            times(read_consent(&store, TENANT, "exclusions").await.unwrap()),
+            (true, Some(700), None)
         );
     }
 

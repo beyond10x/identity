@@ -4929,13 +4929,61 @@ mod tests {
         assert!(store.enforce_row_caps(&[cap()]).await.unwrap().is_some());
     }
 
-    /// The clustered arm of the conditional supersede and the per-source read.
+    /// The clustered arm of the consent upsert, the conditional supersede, and the per-source read.
     async fn exercise_postgres_profile_history(
         store: &Store,
         tenant: &str,
         subject: &str,
         record: &mut profile::StatementRecord,
     ) {
+        let consent_times = |consent: Option<profile::ConsentRecord>| {
+            let consent = consent.unwrap();
+            (consent.granted_at, consent.revoked_at)
+        };
+        let opted_out = format!("{subject}-opted-out");
+        profile::write_consent_at(store, tenant, &opted_out, false, 400)
+            .await
+            .unwrap();
+        profile::write_consent_at(store, tenant, &opted_out, false, 450)
+            .await
+            .unwrap();
+        assert_eq!(
+            consent_times(
+                profile::read_consent(store, tenant, &opted_out)
+                    .await
+                    .unwrap()
+            ),
+            (None, Some(400))
+        );
+        let granted = format!("{subject}-granted");
+        for now in [100, 200] {
+            profile::write_consent_at(store, tenant, &granted, true, now)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            consent_times(
+                profile::read_consent(store, tenant, &granted)
+                    .await
+                    .unwrap()
+            ),
+            (Some(100), None)
+        );
+        profile::write_consent_at(store, tenant, &granted, false, 300)
+            .await
+            .unwrap();
+        profile::write_consent_at(store, tenant, &granted, true, 500)
+            .await
+            .unwrap();
+        assert_eq!(
+            consent_times(
+                profile::read_consent(store, tenant, &granted)
+                    .await
+                    .unwrap()
+            ),
+            (Some(500), None)
+        );
+
         record.epistemic_state = "inferred".to_owned();
         record.resolved_at = None;
         profile::write_statement(store, tenant, subject, record)
