@@ -7,8 +7,7 @@ directory, and the personal collaboration profile.
 The problem it removes: every product service otherwise runs its own upstream OAuth, keeps its own
 copy of who works here, and invents its own idea of what a user identifier means. Here, upstream
 provider tokens never leave this process, a user key is always `(tenant, sub)` and never a bare
-subject, and a consumer resolves a short-lived audience-scoped authority instead of holding a
-login session.
+subject, and every consumer resolves an authority bound to one exact registered audience.
 
 ## Where it sits
 
@@ -17,8 +16,18 @@ Relying parties resolve sessions or five-minute opaque access credentials throug
 audience registrations. Identity contains no relying-party endpoint, provider integration, product
 name, or capability vocabulary.
 
-Login sessions and upstream provider credentials never reach a consumer. A consumer's scope is a
-coarse gate only — it must still run its own admission before an effect-bearing operation.
+Upstream provider credentials never reach a consumer. What a consumer holds depends on how it is
+registered:
+
+| consumer | holds | resolves it at |
+|---|---|---|
+| an in-cluster application registered as a session audience | the person's Identity session, presented with the exact audience | `GET /v1/session-authority` |
+| a caller of the directory or profile routes | the person's Identity session, presented with the route's fixed audience | `/v1/directory/…`, `/v1/profile/…` |
+| a relying party registered as an access audience | a five-minute access credential for that one audience and scope set, never the session | `GET /v1/access-authority` |
+
+Resolving a session returns the person's authority for that audience; it never mints a reusable
+token and never reaches another subject. A consumer's scope is a coarse gate only — it must still
+run its own admission before an effect-bearing operation.
 
 ## Status
 
