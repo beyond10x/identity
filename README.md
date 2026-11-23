@@ -220,7 +220,7 @@ it in a deployment, and any one of them is sufficient:
 - **The image selects no feature.** `Dockerfile` runs `cargo build --locked --release` with no
   `--features`.
 - **A feature build refuses a reachable address.** The process exits before binding unless it both
-  listens on a loopback address and publishes a loopback HTTP origin; the request path checks the
+  listens on a loopback address and publishes a loopback HTTP origin. The request path checks the
   same predicate again.
 
 So `RUSTFLAGS='-C debug-assertions=yes' cargo build --release` cannot include the route.
