@@ -880,8 +880,18 @@ impl AppState {
 
 #[derive(Clone)]
 pub enum Store {
-    Sqlite(Arc<Mutex<Connection>>),
+    Sqlite(Arc<SqliteStore>),
     Postgres(Arc<PostgresStore>),
+}
+
+/// Local `SQLite` state. Public only because it is carried by the public `Store` enum; callers
+/// construct stores through `Store::open` or `Store::in_memory`.
+#[doc(hidden)]
+pub struct SqliteStore {
+    /// Serializes single statements; never held across an `.await`.
+    connection: Mutex<Connection>,
+    /// Serializes a capacity count and its insert, the same contract as `PostgresStore`.
+    capacity_admission: tokio::sync::Mutex<()>,
 }
 
 /// Reconnectable PostgreSQL state. Public only because it is carried by the public `Store` enum;
@@ -1203,7 +1213,10 @@ impl Store {
         ensure_sqlite_column(&connection, "access_tokens", "email", "TEXT")?;
         connection.execute_batch(directory::SQLITE_SCHEMA)?;
         connection.execute_batch(profile::SQLITE_SCHEMA)?;
-        Ok(Self::Sqlite(Arc::new(Mutex::new(connection))))
+        Ok(Self::Sqlite(Arc::new(SqliteStore {
+            connection: Mutex::new(connection),
+            capacity_admission: tokio::sync::Mutex::new(()),
+        })))
     }
 
     async fn put_login(&self, login: &LoginTransaction) -> Result<()> {
@@ -2079,14 +2092,15 @@ impl Store {
 
     async fn capacity_admission(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
         match self {
-            Self::Sqlite(_) => None,
+            Self::Sqlite(store) => Some(store.capacity_admission.lock().await),
             Self::Postgres(store) => Some(store.capacity_admission.lock().await),
         }
     }
 
     fn sqlite_connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         match self {
-            Self::Sqlite(connection) => connection
+            Self::Sqlite(store) => store
+                .connection
                 .lock()
                 .map_err(|_| anyhow::anyhow!("identity database lock poisoned")),
             Self::Postgres(_) => Err(anyhow::anyhow!("identity store is not SQLite")),
@@ -4713,6 +4727,52 @@ mod tests {
             }])
             .await
             .unwrap();
+    }
+
+    /// Invariant 7 on `SQLite`: while one admission is held, neither a credential-table insert nor
+    /// a row-cap check can start its count, so a count and its insert are never interleaved with
+    /// another request's pair. Released, both proceed.
+    #[tokio::test]
+    async fn sqlite_capacity_admission_serializes_check_and_insert() {
+        let store = Store::in_memory().unwrap();
+        let config = config();
+        let identity = Identity {
+            subject: "upstream-subject".to_owned(),
+            email: None,
+        };
+        let credential = format!("identity_session_v1_{}", "c".repeat(43));
+        let cap = || RowCap {
+            sqlite_count: "SELECT count(*) FROM directory_groups WHERE tenant_id = ?1",
+            postgres_count: "SELECT count(*)::BIGINT FROM directory_groups WHERE tenant_id = $1",
+            arguments: &["tenant-dev"],
+            maximum: 1,
+            label: "directory groups",
+        };
+        let wait = std::time::Duration::from_millis(100);
+
+        let held = store.capacity_admission().await;
+        assert!(
+            tokio::time::timeout(
+                wait,
+                store.put_session(&credential, &config, "tenant-dev", &identity)
+            )
+            .await
+            .is_err(),
+            "a session insert ran its capacity check while another admission was held"
+        );
+        assert!(
+            tokio::time::timeout(wait, store.enforce_row_caps(&[cap()]))
+                .await
+                .is_err(),
+            "a row-cap check ran while another admission was held"
+        );
+        drop(held);
+
+        store
+            .put_session(&credential, &config, "tenant-dev", &identity)
+            .await
+            .unwrap();
+        assert!(store.enforce_row_caps(&[cap()]).await.unwrap().is_some());
     }
 
     #[tokio::test]
