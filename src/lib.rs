@@ -4650,6 +4650,55 @@ mod tests {
                 .await
                 .unwrap()
         );
+        exercise_postgres_membership_caps(store, tenant).await;
+    }
+
+    /// Fills one group to 512 members in two statements, then proves the clustered count
+    /// statements admit a repeated save and refuse a new member.
+    async fn exercise_postgres_membership_caps(store: &Store, tenant: &str) {
+        let Store::Postgres(postgres) = store else {
+            panic!("the clustered arm needs a PostgreSQL store");
+        };
+        let client = postgres.client().await.unwrap();
+        client
+            .execute(
+                "INSERT INTO directory_principals (tenant_id, subject, principal_kind, email,
+                   display_name, status, created_at, updated_at)
+                 SELECT $1, 'member-' || lpad(i::TEXT, 4, '0'), 'human', NULL, 'member',
+                   'active', 0, 0 FROM generate_series(1, 513) AS i",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+        directory::write_group(
+            store,
+            tenant,
+            &directory::GroupRecord {
+                group_key: "project-full".to_owned(),
+                display_name: "Project Full".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        client
+            .execute(
+                "INSERT INTO directory_group_members (tenant_id, group_key, subject, added_at)
+                 SELECT $1, 'project-full', 'member-' || lpad(i::TEXT, 4, '0'), 0
+                 FROM generate_series(1, 512) AS i",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+        assert!(
+            directory::admit_group_member(store, tenant, "project-full", "member-0001")
+                .await
+                .is_ok(),
+            "a repeated save at the cap must be admitted"
+        );
+        let refused = directory::admit_group_member(store, tenant, "project-full", "member-0513")
+            .await
+            .expect_err("a 513th member must be refused");
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     async fn exercise_postgres_profile(store: &Store, tenant: &str, subject: &str) {

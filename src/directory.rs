@@ -815,33 +815,66 @@ pub(crate) async fn add_group_member(
             "a suspended organization membership cannot join a group",
         ));
     }
-    let _admission = state
-        .store
-        .enforce_row_caps(&[
-            RowCap {
-                sqlite_count: "SELECT count(*) FROM directory_group_members
-                     WHERE tenant_id = ?1 AND group_key = ?2",
-                postgres_count: "SELECT count(*)::BIGINT FROM directory_group_members
-                     WHERE tenant_id = $1 AND group_key = $2",
-                arguments: &[tenant_id.as_str(), group_key.as_str()],
-                maximum: MAX_GROUP_MEMBERS,
-                label: "group members",
-            },
-            RowCap {
-                sqlite_count: "SELECT count(*) FROM directory_group_members
-                     WHERE tenant_id = ?1 AND subject = ?2",
-                postgres_count: "SELECT count(*)::BIGINT FROM directory_group_members
-                     WHERE tenant_id = $1 AND subject = $2",
-                arguments: &[tenant_id.as_str(), subject.as_str()],
-                maximum: MAX_SUBJECT_GROUPS,
-                label: "group memberships for one subject",
-            },
-        ])
-        .await?;
+    let _admission = admit_group_member(&state.store, &tenant_id, &group_key, &subject).await?;
     write_group_member(&state.store, &tenant_id, &group_key, &subject)
         .await
         .map_err(HttpError::internal)?;
     group_response(&state, &tenant_id, &group).await
+}
+
+/// Admits one membership save against both finite caps. A save of a membership that already
+/// exists adds no row, so each count statement reads 0 for it and the save is admitted at any
+/// count; a save that would add a row is held to the cap. The existence test is inside the count
+/// statement, so it runs under the same admission guard as the count and the caller's insert
+/// (invariant 7).
+pub(crate) async fn admit_group_member<'store>(
+    store: &'store Store,
+    tenant_id: &str,
+    group_key: &str,
+    subject: &str,
+) -> Result<Option<tokio::sync::MutexGuard<'store, ()>>, HttpError> {
+    store
+        .enforce_row_caps(&[
+            RowCap {
+                sqlite_count: "SELECT CASE WHEN EXISTS (
+                       SELECT 1 FROM directory_group_members
+                       WHERE tenant_id = ?1 AND group_key = ?2 AND subject = ?3
+                     ) THEN 0 ELSE (
+                       SELECT count(*) FROM directory_group_members
+                       WHERE tenant_id = ?1 AND group_key = ?2
+                     ) END",
+                postgres_count: "SELECT (CASE WHEN EXISTS (
+                       SELECT 1 FROM directory_group_members
+                       WHERE tenant_id = $1 AND group_key = $2 AND subject = $3
+                     ) THEN 0 ELSE (
+                       SELECT count(*) FROM directory_group_members
+                       WHERE tenant_id = $1 AND group_key = $2
+                     ) END)::BIGINT",
+                arguments: &[tenant_id, group_key, subject],
+                maximum: MAX_GROUP_MEMBERS,
+                label: "group members",
+            },
+            RowCap {
+                sqlite_count: "SELECT CASE WHEN EXISTS (
+                       SELECT 1 FROM directory_group_members
+                       WHERE tenant_id = ?1 AND group_key = ?2 AND subject = ?3
+                     ) THEN 0 ELSE (
+                       SELECT count(*) FROM directory_group_members
+                       WHERE tenant_id = ?1 AND subject = ?3
+                     ) END",
+                postgres_count: "SELECT (CASE WHEN EXISTS (
+                       SELECT 1 FROM directory_group_members
+                       WHERE tenant_id = $1 AND group_key = $2 AND subject = $3
+                     ) THEN 0 ELSE (
+                       SELECT count(*) FROM directory_group_members
+                       WHERE tenant_id = $1 AND subject = $3
+                     ) END)::BIGINT",
+                arguments: &[tenant_id, group_key, subject],
+                maximum: MAX_SUBJECT_GROUPS,
+                label: "group memberships for one subject",
+            },
+        ])
+        .await
 }
 
 pub(crate) async fn remove_group_member(
@@ -961,10 +994,10 @@ async fn group_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        DIRECTORY_ADMIN_GROUP, GroupRecord, MemberRecord, MemberRequest, erase_group_member,
-        require_directory_admin, resolve_group_members, resolve_subject_groups, validated_email,
-        validated_group_key, validated_member, validated_subject, write_group, write_group_member,
-        write_member,
+        DIRECTORY_ADMIN_GROUP, GroupRecord, MemberRecord, MemberRequest, admit_group_member,
+        erase_group_member, require_directory_admin, resolve_group_members, resolve_subject_groups,
+        validated_email, validated_group_key, validated_member, validated_subject, write_group,
+        write_group_member, write_member,
     };
     use crate::{AdmittedSession, StaticGroupMemberships, Store};
 
@@ -1140,6 +1173,115 @@ mod tests {
                 .is_err(),
             "a group in another tenant must not accept this tenant's principal"
         );
+    }
+
+    /// Fills one group to its member cap and one subject to its group cap in two bulk statements
+    /// each, so the cap tests cost milliseconds rather than 512 round trips.
+    fn seed_full_caps(store: &Store) {
+        let connection = store.sqlite_connection().unwrap();
+        connection
+            .execute_batch(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 513)
+                 INSERT INTO directory_principals (tenant_id, subject, principal_kind, email,
+                   display_name, status, created_at, updated_at)
+                 SELECT 'tenant-dev', printf('member-%04d', i), 'human', NULL,
+                   printf('member %d', i), 'active', 0, 0 FROM n;
+                 INSERT INTO directory_principals (tenant_id, subject, principal_kind, email,
+                   display_name, status, created_at, updated_at)
+                 VALUES ('tenant-dev', 'busy-subject', 'agent', NULL, 'busy', 'active', 0, 0);
+                 INSERT INTO directory_groups (tenant_id, group_key, display_name, created_at,
+                   updated_at)
+                 VALUES ('tenant-dev', 'full-group', 'full', 0, 0);
+                 INSERT INTO directory_group_members (tenant_id, group_key, subject, added_at)
+                 SELECT 'tenant-dev', 'full-group', subject, 0 FROM directory_principals
+                 WHERE tenant_id = 'tenant-dev' AND subject BETWEEN 'member-0001' AND 'member-0512';
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 513)
+                 INSERT INTO directory_groups (tenant_id, group_key, display_name, created_at,
+                   updated_at)
+                 SELECT 'tenant-dev', printf('group-%04d', i), printf('group %d', i), 0, 0
+                 FROM n;
+                 INSERT INTO directory_group_members (tenant_id, group_key, subject, added_at)
+                 SELECT 'tenant-dev', group_key, 'busy-subject', 0 FROM directory_groups
+                 WHERE tenant_id = 'tenant-dev' AND group_key BETWEEN 'group-0001' AND 'group-0512';",
+            )
+            .unwrap();
+    }
+
+    fn membership_count(store: &Store, column: &str, value: &str) -> i64 {
+        store
+            .sqlite_connection()
+            .unwrap()
+            .query_row(
+                &format!(
+                    "SELECT count(*) FROM directory_group_members
+                     WHERE tenant_id = 'tenant-dev' AND {column} = ?1"
+                ),
+                [value],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Admits and saves one membership the way the handler does, holding the admission guard
+    /// across the write.
+    async fn save_membership(
+        store: &Store,
+        group_key: &str,
+        subject: &str,
+    ) -> Result<(), crate::HttpError> {
+        let _admission = admit_group_member(store, "tenant-dev", group_key, subject).await?;
+        write_group_member(store, "tenant-dev", group_key, subject)
+            .await
+            .unwrap();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_full_group_admits_a_repeated_save_and_refuses_a_new_member() {
+        let store = Store::in_memory().unwrap();
+        seed_full_caps(&store);
+        assert_eq!(membership_count(&store, "group_key", "full-group"), 512);
+
+        save_membership(&store, "full-group", "member-0001")
+            .await
+            .expect("re-saving an existing membership adds no row and must be admitted");
+        assert_eq!(membership_count(&store, "group_key", "full-group"), 512);
+
+        let refused = save_membership(&store, "full-group", "member-0513")
+            .await
+            .expect_err("a 513th member must be refused");
+        assert_eq!(refused.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            refused.message.contains("group members"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(membership_count(&store, "group_key", "full-group"), 512);
+    }
+
+    #[tokio::test]
+    async fn a_full_subject_admits_a_repeated_save_and_refuses_a_new_group() {
+        let store = Store::in_memory().unwrap();
+        seed_full_caps(&store);
+        assert_eq!(membership_count(&store, "subject", "busy-subject"), 512);
+
+        save_membership(&store, "group-0001", "busy-subject")
+            .await
+            .expect("re-saving an existing membership adds no row and must be admitted");
+        assert_eq!(membership_count(&store, "subject", "busy-subject"), 512);
+
+        let refused = save_membership(&store, "group-0513", "busy-subject")
+            .await
+            .expect_err("a 513th group for one subject must be refused");
+        assert_eq!(refused.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            refused
+                .message
+                .contains("group memberships for one subject"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(membership_count(&store, "subject", "busy-subject"), 512);
     }
 
     #[tokio::test]
