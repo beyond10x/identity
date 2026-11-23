@@ -1909,6 +1909,7 @@ impl Store {
     async fn revoke_session_and_subject_tokens(
         &self,
         credential: &str,
+        tenant_id: &str,
         subject: &str,
     ) -> Result<bool> {
         let now = unix_time()?;
@@ -1922,9 +1923,9 @@ impl Store {
                     params![digest.as_slice(), now],
                 )?;
                 connection.execute(
-                    "UPDATE access_tokens SET revoked_at = ?2
-                     WHERE subject = ?1 AND revoked_at IS NULL",
-                    params![subject, now],
+                    "UPDATE access_tokens SET revoked_at = ?3
+                     WHERE tenant_id = ?1 AND subject = ?2 AND revoked_at IS NULL",
+                    params![tenant_id, subject, now],
                 )?;
                 changed
             }
@@ -1939,9 +1940,9 @@ impl Store {
                     .await?;
                 client
                     .execute(
-                        "UPDATE access_tokens SET revoked_at = $2
-                         WHERE subject = $1 AND revoked_at IS NULL",
-                        &[&subject, &now],
+                        "UPDATE access_tokens SET revoked_at = $3
+                         WHERE tenant_id = $1 AND subject = $2 AND revoked_at IS NULL",
+                        &[&tenant_id, &subject, &now],
                     )
                     .await?;
                 usize::try_from(changed).unwrap_or(usize::MAX)
@@ -2847,7 +2848,7 @@ async fn logout(
         .ok_or_else(|| HttpError::denied("the Identity session is expired or revoked"))?;
     if !state
         .store
-        .revoke_session_and_subject_tokens(credential, &admitted.subject)
+        .revoke_session_and_subject_tokens(credential, &admitted.tenant_id, &admitted.subject)
         .await
         .map_err(HttpError::internal)?
     {
@@ -4708,6 +4709,8 @@ mod tests {
         let subject = format!("subject-{}", random_token(8).unwrap());
         exercise_postgres_directory(&store, &tenant, &subject).await;
         exercise_postgres_profile(&store, &tenant, &subject).await;
+        let other_tenant = format!("tenant-{}", random_token(8).unwrap().to_lowercase());
+        exercise_logout_tenant_scope(&store, &tenant, &other_tenant, &subject).await;
     }
 
     async fn exercise_postgres_directory(store: &Store, tenant: &str, subject: &str) {
@@ -5107,7 +5110,11 @@ mod tests {
         store.put_access_token(&access, &authority).await.unwrap();
         assert!(
             store
-                .revoke_session_and_subject_tokens(&credential, &identity.subject)
+                .revoke_session_and_subject_tokens(
+                    &credential,
+                    &config.tenant_id,
+                    &identity.subject
+                )
                 .await
                 .unwrap()
         );
@@ -5125,6 +5132,80 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn logout_revokes_only_the_access_tokens_of_its_own_tenant() {
+        let store = Store::in_memory().unwrap();
+        exercise_logout_tenant_scope(&store, "tenant-dev", "tenant-other", "shared-subject").await;
+    }
+
+    /// Tenant and subject together are the user key (invariant 4), so the same subject string in
+    /// another tenant is another person: a logout in tenant A leaves tenant B's tokens resolving.
+    async fn exercise_logout_tenant_scope(
+        store: &Store,
+        tenant: &str,
+        other_tenant: &str,
+        subject: &str,
+    ) {
+        let mut config = config();
+        config.tenant_id = tenant.to_owned();
+        let identity = Identity {
+            subject: subject.to_owned(),
+            email: None,
+        };
+        let credential = format!("identity_session_v1_{}", random_token(32).unwrap());
+        store
+            .put_session(&credential, &config, tenant, &identity)
+            .await
+            .unwrap();
+        let now = unix_time().unwrap();
+        let mut access = Vec::new();
+        for (index, tenant_id) in [tenant, tenant, other_tenant].into_iter().enumerate() {
+            let authority = AccessAuthority {
+                iss: config.issuer().to_owned(),
+                sub: subject.to_owned(),
+                aud: TEST_ACCESS_AUDIENCE.to_owned(),
+                iat: now,
+                nbf: now,
+                exp: now + ACCESS_TOKEN_LIFETIME_SECONDS,
+                jti: format!("identity_jti_v1_{}_{index}", random_token(16).unwrap()),
+                act: Actor {
+                    sub: subject.to_owned(),
+                },
+                scope: "resource.read".to_owned(),
+                principal_kind: "human".to_owned(),
+                tenant_id: tenant_id.to_owned(),
+                email: None,
+                groups: Vec::new(),
+            };
+            let token = format!("identity_access_v1_{}", random_token(32).unwrap());
+            store.put_access_token(&token, &authority).await.unwrap();
+            access.push(token);
+        }
+
+        assert!(
+            store
+                .revoke_session_and_subject_tokens(&credential, tenant, subject)
+                .await
+                .unwrap()
+        );
+        for token in &access[..2] {
+            assert!(
+                store
+                    .resolve_access_token(token, TEST_ACCESS_AUDIENCE)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "every token of the logged-out tenant is revoked"
+            );
+        }
+        let other = store
+            .resolve_access_token(&access[2], TEST_ACCESS_AUDIENCE)
+            .await
+            .unwrap()
+            .expect("a logout in one tenant must not revoke the same subject in another tenant");
+        assert_eq!(other.tenant_id, other_tenant);
     }
 
     #[test]
