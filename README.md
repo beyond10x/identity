@@ -178,7 +178,7 @@ Required:
 | variable | format |
 |---|---|
 | `IDENTITY_PUBLIC_ORIGIN` | the issuer: an absolute `https` origin without path, query or fragment; `http` only for host `127.0.0.1` |
-| `IDENTITY_TENANT_ID` | the tenant of a login whose provider has no exact organization mapping (no organization policy, or a base-domain policy) |
+| `IDENTITY_TENANT_ID` | the tenant of a login whose provider uses a single-tenant compatibility mode (no organization claim, or the base-domain allowlist); never used under an exact mapping, see [the rules](#the-rules-that-shape-the-code) |
 | `IDENTITY_AUDIENCE_REGISTRY_JSON` | the `identity.audiences/2` document in [Audiences](#audiences); no default |
 | upstream provider | `IDENTITY_UPSTREAM_PROVIDERS_JSON`, a non-empty array as in [Running it locally](#running-it-locally) whose every `clientSecretEnv` names a set variable; or else all three of `IDENTITY_UPSTREAM_ISSUER` (an `https` URL without query or fragment), `IDENTITY_UPSTREAM_CLIENT_ID`, `IDENTITY_UPSTREAM_CLIENT_SECRET` |
 
@@ -201,7 +201,7 @@ Optional:
 | `IDENTITY_DEFAULT_TENANT_GROUPS_JSON` | `[]`; `[{"tenantId":"…","groups":["…"]}]`, groups for every verified member of the tenant; with the row above, the only groups an authority response carries |
 | `IDENTITY_UPSTREAM_ORGANIZATION_DOMAIN_CLAIM` | unset; the single-provider organization claim, set together with exactly one of the next two |
 | `IDENTITY_ORGANIZATION_TENANTS_JSON` | unset; `[{"claimValue":"…","tenantId":"…"}]`, exact claim-to-tenant mapping |
-| `IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS` | unset; comma-separated base domains |
+| `IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS` | unset; comma-separated base domains, the legacy single-tenant allowlist matched by dotted suffix |
 | `IDENTITY_UPSTREAM_CA_BUNDLE` | unset; see [Running it locally](#running-it-locally) |
 | `IDENTITY_TRUSTED_ACCESS_CALLERS_JSON`, `IDENTITY_ACCESS_EXCHANGE_POLICIES_JSON` | `[]`; see [Running it locally](#running-it-locally) |
 | `RUST_LOG` | `info` |
@@ -305,8 +305,17 @@ These are the reasons the surface looks the way it does. The full statements are
 [`AGENTS.md`](AGENTS.md).
 
 - **Tenant is resolved from a cryptographically verified upstream claim**, before any code or
-  session exists, by exact `claimValue` → `tenantId` mapping. No suffix, email-domain, request-hint
-  or default-tenant fallback. Unknown, duplicate, non-string and unmapped claims fail closed. See
+  session exists. A provider resolves it in one of three modes:
+  1. **Exact mapping** (`IDENTITY_ORGANIZATION_TENANTS_JSON`, or a provider's
+     `organizationTenants`): the claim value maps to its `tenantId`. Suffix matching, email domains,
+     request hints and `IDENTITY_TENANT_ID` are never fallbacks.
+  2. **No organization claim configured**: every login of that provider gets `IDENTITY_TENANT_ID`.
+  3. **Legacy base-domain allowlist** (`IDENTITY_ALLOWED_ORGANIZATION_BASE_DOMAINS`, mutually
+     exclusive with the mapping): a claim equal to a listed domain or ending in `.` plus it gets
+     `IDENTITY_TENANT_ID`.
+
+  Modes 2 and 3 are single-tenant compatibility modes. Unknown, duplicate, non-string and unmapped
+  claims fail closed. See
   [the tenant-resolution decision](docs/decisions/0001-verified-organization-tenant-resolution.md).
 - **Nothing reusable is stored in the clear.** Authorization codes, sessions and access tokens are
   stored only as SHA-256 verifiers. Provider access and refresh tokens are never persisted.
