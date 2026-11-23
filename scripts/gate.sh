@@ -87,6 +87,10 @@ printf 'gate: sh scripts/planning-only-test.sh\n'
 sh scripts/planning-only-test.sh
 printf 'gate: bash scripts/check-local-login-refused.sh\n'
 bash scripts/check-local-login-refused.sh
+printf 'gate: sh scripts/check-docs-source-test.sh\n'
+sh scripts/check-docs-source-test.sh
+printf 'gate: sh scripts/check-docs-source.sh\n'
+sh scripts/check-docs-source.sh
 if [ "$forge" = true ]; then
   printf 'gate: green (--forge: check-audit and check-secrets not run)\n'
   exit 0
